@@ -66,8 +66,8 @@ bannertemplates/
 1. Clone o repositório:
 
 ```bash
-git clone <repo-url>
-cd <repo>
+git clone https://github.com/marllondevsec/BashBanner
+cd BashBanner
 ```
 
 2. Execute o gerenciador:
@@ -108,21 +108,3 @@ Depois de instalado, recarregue o shell com `source ~/.bashrc` ou abra um novo t
 Execute o script e escolha a opção de desinstalar — o manifest e os backups serão usados para restaurar o estado anterior do seu `~/.bashrc`/`~/.zshrc`.
 
 ---
-
-## Contribuição
-
-Contribuições são bem-vindas. Sugestões:
-
-* Adicionar opções de configuração (ex.: modo silencioso, preferência por não limpar a tela).
-* Suporte a themes por diretório.
-* Integração com gerenciadores de dotfiles.
-
----
-
-## Licença
-
-Escolha a licença que preferir (MIT é recomendada para projetos pessoais e utilitários).
-
----
-
-Se quiser, eu adapto o README em inglês, gero um `CHANGELOG.md` com as novidades, ou crio um `CONTRIBUTING.md` com padrões para patches. Basta me dizer qual próximo passo você prefere.
