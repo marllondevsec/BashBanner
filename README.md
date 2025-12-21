@@ -73,7 +73,7 @@ cd BashBanner
 2. Execute o gerenciador:
 
 ```bash
-./BashBanner0.1.sh
+./BashBanner0.2.sh
 ```
 
 O instalador irá:
