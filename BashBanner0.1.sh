@@ -1,48 +1,49 @@
 #!/usr/bin/env bash
-# dynamicbanners_manager.sh
-# Gerenciador interativo para instalar/desinstalar DynamicBanners com log e manifest
 set -euo pipefail
 
-# --- Configurações básicas ---
+# BashBanner0.2.sh
+# Manager interativo para DynamicBanners
+# - detecta XDG dirs (PT-BR/EN)
+# - mostra banners ao entrar em dirs do usuário OU nas pastas do projeto
+# - logging, manifest, backup, uninstall reversível
+# - injeção idempotente no ~/.bashrc ou ~/.zshrc
+
+##########################
+# Config
+##########################
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="$INSTALL_DIR/dynamicbanners.log"
 MANIFEST="$INSTALL_DIR/.dynamicbanners_manifest"
 BACKUP_DIR="$INSTALL_DIR/backups"
-BANNER_DIRS=( "bannerstartup" "bannerpictures" "bannerdocuments" "bannerdownloads" "bannertemplates" "bannermusic" "bannervideos" "bannerpublico" "bannerdesktop" )
-BASHRC_FILE="$HOME/.bashrc"
-ZSHRC_FILE="$HOME/.zshrc"
 MARKER_BEGIN="# BEGIN DynamicBanners"
 MARKER_END="# END DynamicBanners"
 
-# --- Helpers ---
-timestamp() { date +"%Y-%m-%d %H:%M:%S"; }
-log() {
-  local msg="$*"
-  printf '%s %s\n' "$(timestamp)" "$msg" | tee -a "$LOG_FILE"
+USER_BANNER_DIRS=( bannerstartup bannerpictures bannerdocuments bannerdownloads bannertemplates bannermusic bannervideos bannerpublico bannerdesktop )
+
+BASHRC="$HOME/.bashrc"
+ZSHRC="$HOME/.zshrc"
+
+##########################
+# Helpers
+##########################
+timestamp(){ date +"%Y-%m-%d %H:%M:%S"; }
+log(){
+  printf '%s %s\n' "$(timestamp)" "$*" | tee -a "$LOG_FILE"
 }
-ensure_dirs() {
+ensure_state(){
   mkdir -p "$BACKUP_DIR"
   touch "$LOG_FILE"
   touch "$MANIFEST"
 }
-manifest_add() {
-  # grava uma linha no manifest
-  echo "$*" >> "$MANIFEST"
-}
-manifest_read() {
-  cat "$MANIFEST"
-}
-manifest_clear() {
-  rm -f "$MANIFEST"
-  touch "$MANIFEST"
-}
+manifest_add(){ printf '%s\n' "$*" >> "$MANIFEST"; }
+manifest_read(){ [ -f "$MANIFEST" ] && cat "$MANIFEST" || true; }
+manifest_clear(){ rm -f "$MANIFEST"; touch "$MANIFEST"; }
 
-# Segurança: garante que um caminho pertence ao INSTALL_DIR
-is_within_install_dir() {
+# Safe absolute resolution for path check
+is_within_install_dir(){
   local p="$1"
-  local install_abs
+  local install_abs target_abs
   install_abs="$(cd "$INSTALL_DIR" >/dev/null 2>&1 && pwd)"
-  local target_abs
   target_abs="$(cd "$(dirname "$p")" >/dev/null 2>&1 && pwd)/$(basename "$p")"
   case "$target_abs" in
     "$install_abs" | "$install_abs"/*) return 0 ;;
@@ -50,330 +51,11 @@ is_within_install_dir() {
   esac
 }
 
-# Apaga conteúdo entre markers em um arquivo (seguro)
-remove_marked_block() {
-  local file="$1"
-  if [ ! -f "$file" ]; then
-    log "remove_marked_block: arquivo não existe: $file"
-    return 0
-  fi
-  # Faz backup antes de remover
-  local bkp="$BACKUP_DIR/$(basename "$file").pre_remove.$(date +%s).bak"
-  cp -- "$file" "$bkp"
-  manifest_add "BACKUP_RC $file $bkp"
-  # Remove o bloco entre MARKER_BEGIN e MARKER_END
-  awk -v begin="$MARKER_BEGIN" -v end="$MARKER_END" '
-    BEGIN {skip=0}
-    $0 ~ begin {skip=1; next}
-    $0 ~ end {skip=0; next}
-    { if (!skip) print }
-  ' "$bkp" > "$file.tmp" && mv "$file.tmp" "$file"
-  log "Block removido de $file (backup em $bkp)"
-}
-
-# Adiciona o bloco zsh ou bash de forma idempotente (com deteção XDG / PT-BR / EN)
-append_block_to_rc() {
-  local rc_file="$1"
-  local shell_type="$2" # "bash" ou "zsh"
-  if [ ! -f "$rc_file" ]; then
-    touch "$rc_file"
-    manifest_add "CREATED_FILE $rc_file"
-    log "Criado $rc_file porque não existia."
-  fi
-
-  if grep -Fq "$MARKER_BEGIN" "$rc_file" 2>/dev/null; then
-    log "Marcador já presente em $rc_file — pulando append."
-    return
-  fi
-
-  # backup do rc antes de alterar
-  local backup="$BACKUP_DIR/$(basename "$rc_file").bak.$(date +%s)"
-  cp -- "$rc_file" "$backup"
-  manifest_add "BACKUP_RC $rc_file $backup"
-  log "Backup de $rc_file criado em $backup"
-
-  if [ "$shell_type" = "zsh" ]; then
-    cat >> "$rc_file" <<'ZSH_BLOCK'
-
-# BEGIN DynamicBanners
-# DynamicBanners (zsh) - adicionado pelo installer
-export DYNAMIC_BANNERS_SHELL="zsh"
-export SCRIPT_DIR="__INSTALL_DIR_PLACEHOLDER__"
-BANNER_STARTUP_DIR="$SCRIPT_DIR/bannerstartup"
-BANNER_PICTURES_DIR="$SCRIPT_DIR/bannerpictures"
-BANNER_DOCUMENTS_DIR="$SCRIPT_DIR/bannerdocuments"
-BANNER_DOWNLOADS_DIR="$SCRIPT_DIR/bannerdownloads"
-BANNER_TEMPLATES_DIR="$SCRIPT_DIR/bannertemplates"
-BANNER_MUSIC_DIR="$SCRIPT_DIR/bannermusic"
-BANNER_VIDEOS_DIR="$SCRIPT_DIR/bannervideos"
-BANNER_PUBLICO_DIR="$SCRIPT_DIR/bannerpublico"
-BANNER_DESKTOP_DIR="$SCRIPT_DIR/bannerdesktop"
-
-# Resolve diretórios XDG ou nomes locais (zsh)
-resolve_xdg_or_local() {
-  local key="$1"
-  local -a candidates
-  # 1) xdg-user-dir
-  if command -v xdg-user-dir >/dev/null 2>&1; then
-    local d
-    d=$(xdg-user-dir "$key" 2>/dev/null || true)
-    [ -n "$d" ] && candidates+=("$d")
-  fi
-  # 2) ~/.config/user-dirs.dirs
-  if [ -f "$HOME/.config/user-dirs.dirs" ]; then
-    local line d
-    line=$(grep -E "^XDG_${key}_DIR=" "$HOME/.config/user-dirs.dirs" 2>/dev/null || true)
-    if [ -n "$line" ]; then
-      eval "$line"
-      eval "d=\$XDG_${key}_DIR"
-      d=${d/#\$HOME/$HOME}
-      candidates+=("$d")
-    fi
-  fi
-  # 3) common names (EN + PT-BR)
-  case "$key" in
-    DESKTOP) candidates+=("$HOME/Desktop" "$HOME/Área de Trabalho" "$HOME/Área_de_Trabalho" "$HOME/Work") ;;
-    DOCUMENTS) candidates+=("$HOME/Documents" "$HOME/Documentos") ;;
-    DOWNLOAD) candidates+=("$HOME/Downloads" "$HOME/Transferências" "$HOME/Transferencias") ;;
-    PICTURES) candidates+=("$HOME/Pictures" "$HOME/Imagens" "$HOME/Images") ;;
-    MUSIC) candidates+=("$HOME/Music" "$HOME/Música" "$HOME/Musicas") ;;
-    VIDEOS) candidates+=("$HOME/Videos" "$HOME/Vídeos") ;;
-    PUBLICSHARE) candidates+=("$HOME/Public" "$HOME/Público" "$HOME/Publico") ;;
-    TEMPLATES) candidates+=("$HOME/Templates" "$HOME/Modelos") ;;
-  esac
-
-  local c
-  for c in "${candidates[@]}"; do
-    [ -z "$c" ] && continue
-    if [ -d "$c" ]; then
-      printf '%s' "$c"
-      return 0
-    fi
-  done
-  return 1
-}
-
-# Pre-resolve (ao carregar o rc) para velocidade; fallback para SCRIPT_DIR/banner*
-BANNER_DESKTOP_DIR="$(resolve_xdg_or_local DESKTOP 2>/dev/null || true)"
-BANNER_DOCUMENTS_DIR="$(resolve_xdg_or_local DOCUMENTS 2>/dev/null || true)"
-BANNER_DOWNLOADS_DIR="$(resolve_xdg_or_local DOWNLOAD 2>/dev/null || true)"
-BANNER_PICTURES_DIR="$(resolve_xdg_or_local PICTURES 2>/dev/null || true)"
-BANNER_MUSIC_DIR="$(resolve_xdg_or_local MUSIC 2>/dev/null || true)"
-BANNER_VIDEOS_DIR="$(resolve_xdg_or_local VIDEOS 2>/dev/null || true)"
-BANNER_PUBLICO_DIR="$(resolve_xdg_or_local PUBLICSHARE 2>/dev/null || true)"
-BANNER_TEMPLATES_DIR="$(resolve_xdg_or_local TEMPLATES 2>/dev/null || true)"
-
-# If any are empty, point them to local SCRIPT_DIR/banner*
-[ -z "$BANNER_DESKTOP_DIR" ] && BANNER_DESKTOP_DIR="$SCRIPT_DIR/bannerdesktop"
-[ -z "$BANNER_DOCUMENTS_DIR" ] && BANNER_DOCUMENTS_DIR="$SCRIPT_DIR/bannerdocuments"
-[ -z "$BANNER_DOWNLOADS_DIR" ] && BANNER_DOWNLOADS_DIR="$SCRIPT_DIR/bannerdownloads"
-[ -z "$BANNER_PICTURES_DIR" ] && BANNER_PICTURES_DIR="$SCRIPT_DIR/bannerpictures"
-[ -z "$BANNER_MUSIC_DIR" ] && BANNER_MUSIC_DIR="$SCRIPT_DIR/bannermusic"
-[ -z "$BANNER_VIDEOS_DIR" ] && BANNER_VIDEOS_DIR="$SCRIPT_DIR/bannervideos"
-[ -z "$BANNER_PUBLICO_DIR" ] && BANNER_PUBLICO_DIR="$SCRIPT_DIR/bannerpublico"
-[ -z "$BANNER_TEMPLATES_DIR" ] && BANNER_TEMPLATES_DIR="$SCRIPT_DIR/bannertemplates"
-[ -z "$BANNER_STARTUP_DIR" ] && BANNER_STARTUP_DIR="$SCRIPT_DIR/bannerstartup"
-
-# Ensure receiver directories exist (create under SCRIPT_DIR for local fallbacks)
-mkdir -p "$SCRIPT_DIR/bannerstartup" "$SCRIPT_DIR/bannerpictures" "$SCRIPT_DIR/bannerdocuments" \
-         "$SCRIPT_DIR/bannerdownloads" "$SCRIPT_DIR/bannertemplates" "$SCRIPT_DIR/bannermusic" \
-         "$SCRIPT_DIR/bannervideos" "$SCRIPT_DIR/bannerpublico" "$SCRIPT_DIR/bannerdesktop" 2>/dev/null || true
-
-display_random_banner() {
-  local banner_dir=$1
-  local files=( "$banner_dir"/*.txt )
-  if [ -e "${files[0]}" ]; then
-    shuf -n 1 -e "${files[@]}" | xargs -r -I{} cat "{}"
-  fi
-}
-
-if [ -z "${BANNER_SHOWN:-}" ]; then
-  display_random_banner "$BANNER_STARTUP_DIR"
-  export BANNER_SHOWN=true
-fi
-
-function chpwd() {
-  local cwd="$PWD"
-  local banner_dir=""
-
-  # If some variables are empty, try resolve on the fly
-  [ -z "$BANNER_DESKTOP_DIR" ] && BANNER_DESKTOP_DIR="$(resolve_xdg_or_local DESKTOP 2>/dev/null || true)"
-  [ -z "$BANNER_DOCUMENTS_DIR" ] && BANNER_DOCUMENTS_DIR="$(resolve_xdg_or_local DOCUMENTS 2>/dev/null || true)"
-  [ -z "$BANNER_DOWNLOADS_DIR" ] && BANNER_DOWNLOADS_DIR="$(resolve_xdg_or_local DOWNLOAD 2>/dev/null || true)"
-  [ -z "$BANNER_PICTURES_DIR" ] && BANNER_PICTURES_DIR="$(resolve_xdg_or_local PICTURES 2>/dev/null || true)"
-  [ -z "$BANNER_MUSIC_DIR" ] && BANNER_MUSIC_DIR="$(resolve_xdg_or_local MUSIC 2>/dev/null || true)"
-  [ -z "$BANNER_VIDEOS_DIR" ] && BANNER_VIDEOS_DIR="$(resolve_xdg_or_local VIDEOS 2>/dev/null || true)"
-  [ -z "$BANNER_PUBLICO_DIR" ] && BANNER_PUBLICO_DIR="$(resolve_xdg_or_local PUBLICSHARE 2>/dev/null || true)"
-  [ -z "$BANNER_TEMPLATES_DIR" ] && BANNER_TEMPLATES_DIR="$(resolve_xdg_or_local TEMPLATES 2>/dev/null || true)"
-
-  case "$cwd" in
-    "$BANNER_PICTURES_DIR" | "$BANNER_PICTURES_DIR"/*) banner_dir="$BANNER_PICTURES_DIR" ;;
-    "$BANNER_DOCUMENTS_DIR" | "$BANNER_DOCUMENTS_DIR"/*) banner_dir="$BANNER_DOCUMENTS_DIR" ;;
-    "$BANNER_DOWNLOADS_DIR" | "$BANNER_DOWNLOADS_DIR"/*) banner_dir="$BANNER_DOWNLOADS_DIR" ;;
-    "$BANNER_TEMPLATES_DIR" | "$BANNER_TEMPLATES_DIR"/*) banner_dir="$BANNER_TEMPLATES_DIR" ;;
-    "$BANNER_MUSIC_DIR" | "$BANNER_MUSIC_DIR"/*) banner_dir="$BANNER_MUSIC_DIR" ;;
-    "$BANNER_VIDEOS_DIR" | "$BANNER_VIDEOS_DIR"/*) banner_dir="$BANNER_VIDEOS_DIR" ;;
-    "$BANNER_PUBLICO_DIR" | "$BANNER_PUBLICO_DIR"/*) banner_dir="$BANNER_PUBLICO_DIR" ;;
-    "$BANNER_DESKTOP_DIR" | "$BANNER_DESKTOP_DIR"/*) banner_dir="$BANNER_DESKTOP_DIR" ;;
-    *) return ;;
-  esac
-
-  if [ -n "$banner_dir" ] && [ "${LAST_DIR:-}" != "$PWD" ]; then
-    display_random_banner "$banner_dir"
-    LAST_DIR="$PWD"
-  fi
-}
-
-autoload -U add-zsh-hook 2>/dev/null || true
-add-zsh-hook chpwd chpwd 2>/dev/null || true
-# END DynamicBanners
-
-ZSH_BLOCK
-    # replace placeholder with real INSTALL_DIR (safe)
-    sed -i "s|__INSTALL_DIR_PLACEHOLDER__|$INSTALL_DIR|g" "$rc_file"
-    manifest_add "APPENDED_RC $rc_file zsh"
-    log "Bloco zsh adicionado em $rc_file"
-  else
-    # bloco para bash (note: this block will expand INSTALL_DIR at write time)
-    cat >> "$rc_file" <<'BASH_BLOCK'
-
-# BEGIN DynamicBanners
-# DynamicBanners (bash) - adicionado pelo installer
-export DYNAMIC_BANNERS_SHELL="bash"
-export SCRIPT_DIR="$INSTALL_DIR"
-BANNER_STARTUP_DIR="\$SCRIPT_DIR/bannerstartup"
-BANNER_PICTURES_DIR="\$SCRIPT_DIR/bannerpictures"
-BANNER_DOCUMENTS_DIR="\$SCRIPT_DIR/bannerdocuments"
-BANNER_DOWNLOADS_DIR="\$SCRIPT_DIR/bannerdownloads"
-BANNER_TEMPLATES_DIR="\$SCRIPT_DIR/bannertemplates"
-BANNER_MUSIC_DIR="\$SCRIPT_DIR/bannermusic"
-BANNER_VIDEOS_DIR="\$SCRIPT_DIR/bannervideos"
-BANNER_PUBLICO_DIR="\$SCRIPT_DIR/bannerpublico"
-BANNER_DESKTOP_DIR="\$SCRIPT_DIR/bannerdesktop"
-
-# Resolve diretórios XDG ou nomes locais (bash)
-resolve_xdg_or_local() {
-  local key="\$1"
-  local candidates=()
-  if command -v xdg-user-dir >/dev/null 2>&1; then
-    local d
-    d=\$(xdg-user-dir "\$key" 2>/dev/null || true)
-    [ -n "\$d" ] && candidates+=( "\$d" )
-  fi
-  if [ -f "\$HOME/.config/user-dirs.dirs" ]; then
-    local line d
-    line=\$(grep -E "^XDG_\${key}_DIR=" "\$HOME/.config/user-dirs.dirs" 2>/dev/null || true)
-    if [ -n "\$line" ]; then
-      eval "\$line"
-      eval "d=\$XDG_${key}_DIR"
-      d=\${d/#\$HOME/\$HOME}
-      candidates+=( "\$d" )
-    fi
-  fi
-  case "\$key" in
-    DESKTOP) candidates+=( "\$HOME/Desktop" "\$HOME/Área de Trabalho" "\$HOME/Área_de_Trabalho" "\$HOME/Work" ) ;;
-    DOCUMENTS) candidates+=( "\$HOME/Documents" "\$HOME/Documentos" ) ;;
-    DOWNLOAD) candidates+=( "\$HOME/Downloads" "\$HOME/Transferências" "\$HOME/Transferencias" ) ;;
-    PICTURES) candidates+=( "\$HOME/Pictures" "\$HOME/Imagens" "\$HOME/Images" ) ;;
-    MUSIC) candidates+=( "\$HOME/Music" "\$HOME/Música" "\$HOME/Musicas" ) ;;
-    VIDEOS) candidates+=( "\$HOME/Videos" "\$HOME/Vídeos" ) ;;
-    PUBLICSHARE) candidates+=( "\$HOME/Public" "\$HOME/Público" "\$HOME/Publico" ) ;;
-    TEMPLATES) candidates+=( "\$HOME/Templates" "\$HOME/Modelos" ) ;;
-  esac
-
-  local c
-  for c in "\${candidates[@]}"; do
-    [ -z "\$c" ] && continue
-    if [ -d "\$c" ]; then
-      printf '%s' "\$c"
-      return 0
-    fi
-  done
-  return 1
-}
-
-# Pre-resolve (ao carregar o rc)
-BANNER_DESKTOP_DIR="\$(resolve_xdg_or_local DESKTOP 2>/dev/null || true)"
-BANNER_DOCUMENTS_DIR="\$(resolve_xdg_or_local DOCUMENTS 2>/dev/null || true)"
-BANNER_DOWNLOADS_DIR="\$(resolve_xdg_or_local DOWNLOAD 2>/dev/null || true)"
-BANNER_PICTURES_DIR="\$(resolve_xdg_or_local PICTURES 2>/dev/null || true)"
-BANNER_MUSIC_DIR="\$(resolve_xdg_or_local MUSIC 2>/dev/null || true)"
-BANNER_VIDEOS_DIR="\$(resolve_xdg_or_local VIDEOS 2>/dev/null || true)"
-BANNER_PUBLICO_DIR="\$(resolve_xdg_or_local PUBLICSHARE 2>/dev/null || true)"
-BANNER_TEMPLATES_DIR="\$(resolve_xdg_or_local TEMPLATES 2>/dev/null || true)"
-
-# Fallback to local SCRIPT_DIR/banner* if missing
-[ -z "\$BANNER_DESKTOP_DIR" ] && BANNER_DESKTOP_DIR="\$SCRIPT_DIR/bannerdesktop"
-[ -z "\$BANNER_DOCUMENTS_DIR" ] && BANNER_DOCUMENTS_DIR="\$SCRIPT_DIR/bannerdocuments"
-[ -z "\$BANNER_DOWNLOADS_DIR" ] && BANNER_DOWNLOADS_DIR="\$SCRIPT_DIR/bannerdownloads"
-[ -z "\$BANNER_PICTURES_DIR" ] && BANNER_PICTURES_DIR="\$SCRIPT_DIR/bannerpictures"
-[ -z "\$BANNER_MUSIC_DIR" ] && BANNER_MUSIC_DIR="\$SCRIPT_DIR/bannermusic"
-[ -z "\$BANNER_VIDEOS_DIR" ] && BANNER_VIDEOS_DIR="\$SCRIPT_DIR/bannervideos"
-[ -z "\$BANNER_PUBLICO_DIR" ] && BANNER_PUBLICO_DIR="\$SCRIPT_DIR/bannerpublico"
-[ -z "\$BANNER_TEMPLATES_DIR" ] && BANNER_TEMPLATES_DIR="\$SCRIPT_DIR/bannertemplates"
-[ -z "\$BANNER_STARTUP_DIR" ] && BANNER_STARTUP_DIR="\$SCRIPT_DIR/bannerstartup"
-
-# Ensure receiver directories exist (create under SCRIPT_DIR for local fallbacks)
-mkdir -p "\$SCRIPT_DIR/bannerstartup" "\$SCRIPT_DIR/bannerpictures" "\$SCRIPT_DIR/bannerdocuments" \
-         "\$SCRIPT_DIR/bannerdownloads" "\$SCRIPT_DIR/bannertemplates" "\$SCRIPT_DIR/bannermusic" \
-         "\$SCRIPT_DIR/bannervideos" "\$SCRIPT_DIR/bannerpublico" "\$SCRIPT_DIR/bannerdesktop" 2>/dev/null || true
-
-display_random_banner() {
-  local banner_dir="\$1"
-  local files=( "\$banner_dir"/*.txt )
-  if [ -e "\${files[0]}" ]; then
-    shuf -n 1 -e "\${files[@]}" | xargs -r -I{} cat "{}"
-  fi
-}
-
-if [ -z "\${BANNER_SHOWN:-}" ]; then
-  display_random_banner "\$BANNER_STARTUP_DIR"
-  export BANNER_SHOWN=true
-fi
-
-_DYNAMICB_LAST_DIR="${PWD:-}"
-_dynamicb_check_pwd() {
-  if [ "${PWD:-}" != "${_DYNAMICB_LAST_DIR:-}" ]; then
-    # If pre-resolved missing, resolve on-the-fly
-    [ -z "\$BANNER_DESKTOP_DIR" ] && BANNER_DESKTOP_DIR="\$(resolve_xdg_or_local DESKTOP 2>/dev/null || true)"
-    [ -z "\$BANNER_DOCUMENTS_DIR" ] && BANNER_DOCUMENTS_DIR="\$(resolve_xdg_or_local DOCUMENTS 2>/dev/null || true)"
-    [ -z "\$BANNER_DOWNLOADS_DIR" ] && BANNER_DOWNLOADS_DIR="\$(resolve_xdg_or_local DOWNLOAD 2>/dev/null || true)"
-    [ -z "\$BANNER_PICTURES_DIR" ] && BANNER_PICTURES_DIR="\$(resolve_xdg_or_local PICTURES 2>/dev/null || true)"
-    [ -z "\$BANNER_MUSIC_DIR" ] && BANNER_MUSIC_DIR="\$(resolve_xdg_or_local MUSIC 2>/dev/null || true)"
-    [ -z "\$BANNER_VIDEOS_DIR" ] && BANNER_VIDEOS_DIR="\$(resolve_xdg_or_local VIDEOS 2>/dev/null || true)"
-    [ -z "\$BANNER_PUBLICO_DIR" ] && BANNER_PUBLICO_DIR="\$(resolve_xdg_or_local PUBLICSHARE 2>/dev/null || true)"
-    [ -z "\$BANNER_TEMPLATES_DIR" ] && BANNER_TEMPLATES_DIR="\$(resolve_xdg_or_local TEMPLATES 2>/dev/null || true)"
-
-    case "$PWD" in
-      "$BANNER_PICTURES_DIR" | "$BANNER_PICTURES_DIR"/*) display_random_banner "$BANNER_PICTURES_DIR" ;;
-      "$BANNER_DOCUMENTS_DIR" | "$BANNER_DOCUMENTS_DIR"/*) display_random_banner "$BANNER_DOCUMENTS_DIR" ;;
-      "$BANNER_DOWNLOADS_DIR" | "$BANNER_DOWNLOADS_DIR"/*) display_random_banner "$BANNER_DOWNLOADS_DIR" ;;
-      "$BANNER_TEMPLATES_DIR" | "$BANNER_TEMPLATES_DIR"/*) display_random_banner "$BANNER_TEMPLATES_DIR" ;;
-      "$BANNER_MUSIC_DIR" | "$BANNER_MUSIC_DIR"/*) display_random_banner "$BANNER_MUSIC_DIR" ;;
-      "$BANNER_VIDEOS_DIR" | "$BANNER_VIDEOS_DIR"/*) display_random_banner "$BANNER_VIDEOS_DIR" ;;
-      "$BANNER_PUBLICO_DIR" | "$BANNER_PUBLICO_DIR"/*) display_random_banner "$BANNER_PUBLICO_DIR" ;;
-      "$BANNER_DESKTOP_DIR" | "$BANNER_DESKTOP_DIR"/*) display_random_banner "$BANNER_DESKTOP_DIR" ;;
-      *) ;;
-    esac
-
-    _DYNAMICB_LAST_DIR="$PWD"
-  fi
-}
-
-if [[ ":${PROMPT_COMMAND}:" != *":_dynamicb_check_pwd:"* ]]; then
-  PROMPT_COMMAND="_dynamicb_check_pwd;${PROMPT_COMMAND:-}"
-fi
-# END DynamicBanners
-
-BASH_BLOCK
-    manifest_add "APPENDED_RC $rc_file bash"
-    log "Bloco bash adicionado em $rc_file"
-  fi
-}
-
-# Cria diretórios de banner (idempotente) — também cria local fallbacks
-create_banner_dirs() {
-  for d in "${BANNER_DIRS[@]}"; do
+##########################
+# Create banner folders (installer-side)
+##########################
+create_banner_dirs(){
+  for d in "${USER_BANNER_DIRS[@]}"; do
     local path="$INSTALL_DIR/$d"
     if [ ! -d "$path" ]; then
       mkdir -p "$path"
@@ -383,102 +65,198 @@ create_banner_dirs() {
       log "Diretório já existe: $path"
     fi
   done
-
-  # Também garanta que os diretórios locais under SCRIPT_DIR existam (fallbacks)
-  mkdir -p "$INSTALL_DIR/bannerstartup" "$INSTALL_DIR/bannerpictures" "$INSTALL_DIR/bannerdocuments" \
-           "$INSTALL_DIR/bannerdownloads" "$INSTALL_DIR/bannertemplates" "$INSTALL_DIR/bannermusic" \
-           "$INSTALL_DIR/bannervideos" "$INSTALL_DIR/bannerpublico" "$INSTALL_DIR/bannerdesktop" 2>/dev/null || true
 }
 
-# Cria ficheiros placeholder instaladores (apenas se não existirem)
-create_placeholder_installers() {
-  local b="$INSTALL_DIR/ibash.sh"
-  local zb="$INSTALL_DIR/izsh.sh"
-  if [ ! -f "$b" ]; then
-    cat > "$b" <<'EOF'
-#!/usr/bin/env bash
-# placeholder ibash.sh
-echo "ibash installer placeholder"
-EOF
-    chmod +x "$b"
-    manifest_add "CREATED_FILE $b"
-    log "Placeholder criado: $b"
+##########################
+# Generate injected shell block (idempotent)
+# We'll remove any previous DynamicBanners block before appending.
+##########################
+generate_injected_block(){
+  # This is a POSIX-friendly block that works in both bash and zsh.
+  # It sets a safe PATH prefix, resolves XDG dirs once, and defines a robust
+  # function to pick a random .txt banner using find + shuf / fallback.
+  cat <<'EOF'
+# BEGIN DynamicBanners
+# DynamicBanners injected by BashBanner0.2
+# Ensure minimal PATH so builtin utilities are available even early.
+export PATH="/usr/bin:/bin:$PATH"
+
+SCRIPT_DIR="__INSTALL_DIR__"
+
+# Resolve XDG-user-dirs if present, otherwise fallbacks
+if [ -f "$HOME/.config/user-dirs.dirs" ]; then
+  # shellcheck disable=SC1090
+  . "$HOME/.config/user-dirs.dirs"
+fi
+
+DESKTOP_DIR="${XDG_DESKTOP_DIR:-$HOME/Desktop}"
+DOCUMENTS_DIR="${XDG_DOCUMENTS_DIR:-$HOME/Documents}"
+DOWNLOADS_DIR="${XDG_DOWNLOAD_DIR:-$HOME/Downloads}"
+PICTURES_DIR="${XDG_PICTURES_DIR:-$HOME/Pictures}"
+MUSIC_DIR="${XDG_MUSIC_DIR:-$HOME/Music}"
+VIDEOS_DIR="${XDG_VIDEOS_DIR:-$HOME/Videos}"
+PUBLIC_DIR="${XDG_PUBLICSHARE_DIR:-$HOME/Public}"
+TEMPLATES_DIR="${XDG_TEMPLATES_DIR:-$HOME/Templates}"
+
+# Expand $HOME tokens if any
+for v in DESKTOP_DIR DOCUMENTS_DIR DOWNLOADS_DIR PICTURES_DIR MUSIC_DIR VIDEOS_DIR PUBLIC_DIR TEMPLATES_DIR; do
+  eval "$v=\"\${$v/\$HOME/\$HOME}\""
+done
+
+# pick a random .txt file from a directory robustly (works early, avoids fragile arrays)
+_display_random_banner() {
+  local dir="$1"
+  [ -d "$dir" ] || return 1
+
+  # Try find + shuf if available
+  local file
+  if command -v shuf >/dev/null 2>&1; then
+    file="$(find "$dir" -maxdepth 1 -type f -name '*.txt' -print 2>/dev/null | shuf -n1 2>/dev/null || true)"
+  else
+    # fallback: pick first .txt
+    file="$(find "$dir" -maxdepth 1 -type f -name '*.txt' -print 2>/dev/null | awk 'NR==1{print; exit}' || true)"
   fi
-  if [ ! -f "$zb" ]; then
-    cat > "$zb" <<'EOF'
-#!/usr/bin/env bash
-# placeholder izsh.sh
-echo "izsh installer placeholder"
-EOF
-    chmod +x "$zb"
-    manifest_add "CREATED_FILE $zb"
-    log "Placeholder criado: $zb"
-  fi
+
+  [ -n "$file" ] || return 1
+  # Clear only if running in interactive terminal
+  if [ -t 1 ]; then clear; fi
+  cat "$file"
+  return 0
 }
 
-# --- Instalar ---
-perform_install() {
-  ensure_dirs
-  log "Iniciando instalação do DynamicBanners em $INSTALL_DIR"
+# Main checker executed on directory change
+_dynamicb_check_dir() {
+  local cwd="$PWD"
 
-  # Detecta shell padrão
-  local default_shell="$(basename "${SHELL:-/bin/sh}")"
+  # 1) If we are inside user's real XDG dir, show the banner from INSTALL_DIR
+  case "$cwd" in
+    "$DOWNLOADS_DIR"*) _display_random_banner "$SCRIPT_DIR/bannerdownloads" && return ;;
+    "$DOCUMENTS_DIR"*) _display_random_banner "$SCRIPT_DIR/bannerdocuments" && return ;;
+    "$PICTURES_DIR"*)  _display_random_banner "$SCRIPT_DIR/bannerpictures" && return ;;
+    "$MUSIC_DIR"*)     _display_random_banner "$SCRIPT_DIR/bannermusic" && return ;;
+    "$VIDEOS_DIR"*)    _display_random_banner "$SCRIPT_DIR/bannervideos" && return ;;
+    "$PUBLIC_DIR"*)    _display_random_banner "$SCRIPT_DIR/bannerpublico" && return ;;
+    "$DESKTOP_DIR"*)   _display_random_banner "$SCRIPT_DIR/bannerdesktop" && return ;;
+    "$TEMPLATES_DIR"*) _display_random_banner "$SCRIPT_DIR/bannertemplates" && return ;;
+  esac
+
+  # 2) If user is inside the INSTALL_DIR banner subfolders (preview mode)
+  case "$cwd" in
+    "$SCRIPT_DIR"/bannerdownloads* ) _display_random_banner "$SCRIPT_DIR/bannerdownloads" && return ;;
+    "$SCRIPT_DIR"/bannerdocuments* ) _display_random_banner "$SCRIPT_DIR/bannerdocuments" && return ;;
+    "$SCRIPT_DIR"/bannerpictures* )  _display_random_banner "$SCRIPT_DIR/bannerpictures" && return ;;
+    "$SCRIPT_DIR"/bannertemplates* ) _display_random_banner "$SCRIPT_DIR/bannertemplates" && return ;;
+    "$SCRIPT_DIR"/bannermusic* )     _display_random_banner "$SCRIPT_DIR/bannermusic" && return ;;
+    "$SCRIPT_DIR"/bannervideos* )    _display_random_banner "$SCRIPT_DIR/bannervideos" && return ;;
+    "$SCRIPT_DIR"/bannerpublico* )   _display_random_banner "$SCRIPT_DIR/bannerpublico" && return ;;
+    "$SCRIPT_DIR"/bannerdesktop* )   _display_random_banner "$SCRIPT_DIR/bannerdesktop" && return ;;
+    "$SCRIPT_DIR"/bannerstartup* )   _display_random_banner "$SCRIPT_DIR/bannerstartup" && return ;;
+  esac
+
+  return 0
+}
+
+# Hook into zsh or bash
+if [ -n "${ZSH_VERSION:-}" ]; then
+  autoload -U add-zsh-hook 2>/dev/null || true
+  add-zsh-hook chpwd _dynamicb_check_dir 2>/dev/null || true
+fi
+if [ -n "${BASH_VERSION:-}" ]; then
+  # Avoid duplicating PROMPT_COMMAND entry
+  case ":${PROMPT_COMMAND:-}:" in
+    *":_dynamicb_check_dir:"*) : ;;
+    *) PROMPT_COMMAND="_dynamicb_check_dir;${PROMPT_COMMAND:-}" ;;
+  esac
+fi
+
+# END DynamicBanners
+EOF
+}
+
+##########################
+# Installer: append block safely
+##########################
+append_block_to_rc(){
+  local rc_file="$1"
+  ensure_state
+
+  # create rc if missing
+  if [ ! -f "$rc_file" ]; then
+    touch "$rc_file"
+    manifest_add "CREATED_FILE $rc_file"
+    log "Criado $rc_file porque não existia."
+  fi
+
+  # backup rc
+  local bkp="$BACKUP_DIR/$(basename "$rc_file").bak.$(date +%s)"
+  cp -- "$rc_file" "$bkp"
+  manifest_add "BACKUP_RC $rc_file $bkp"
+  log "Backup de $rc_file criado em $bkp"
+
+  # remove previous injected block (if any)
+  # sed range: from MARKER_BEGIN to MARKER_END inclusive
+  sed -i "/$MARKER_BEGIN/,/$MARKER_END/d" "$rc_file"
+
+  # prepare block with actual INSTALL_DIR substituted
+  local block
+  block="$(generate_injected_block)"
+  block="${block//__INSTALL_DIR__/$INSTALL_DIR}"
+
+  # append
+  printf "\n%s\n" "$block" >> "$rc_file"
+  manifest_add "APPENDED_RC $rc_file"
+  log "Bloco adicionado em $rc_file"
+}
+
+##########################
+# Installer main
+##########################
+perform_install(){
+  ensure_state
+  log "Iniciando instalação em $INSTALL_DIR"
+
+  create_banner_dirs
+
+  # decide which rc(s) to modify
+  local default_shell rc_targets=()
+  default_shell="$(basename "${SHELL:-/bin/sh}")"
   log "Shell detectado: $default_shell"
 
+  # interactive selection
   echo "Escolha onde instalar:"
   PS3="Opção: "
   select opt in "Shell detectado ($default_shell)" "Ambos (bash + zsh)" "Escolher manualmente" "Cancelar"; do
     case "$REPLY" in
-      1) targets=("$default_shell"); break ;;
-      2) targets=("bash" "zsh"); break ;;
-      3)
-         echo "Escolha manual: digite 'bash', 'zsh', ou ambos separados por espaço:"
-         read -r -a arr
-         targets=("${arr[@]}")
-         break
-         ;;
-      4) log "Instalação cancelada pelo usuário."; return ;;
+      1) rc_targets=("$default_shell"); break ;;
+      2) rc_targets=(bash zsh); break ;;
+      3) read -rp "Digite 'bash', 'zsh', ou ambos separados por espaço: " -a arr; rc_targets=("${arr[@]}"); break ;;
+      4) log "Instalação cancelada"; return ;;
       *) echo "Opção inválida";;
     esac
   done
 
-  # Cria dirs e files
-  create_banner_dirs
-  create_placeholder_installers
-
-  # Adiciona blocos
-  for t in "${targets[@]}"; do
+  for t in "${rc_targets[@]}"; do
     case "$t" in
-      bash)
-        append_block_to_rc "$BASHRC_FILE" "bash"
-        ;;
-      zsh)
-        append_block_to_rc "$ZSHRC_FILE" "zsh"
-        ;;
+      bash) append_block_to_rc "$BASHRC" ;;
+      zsh) append_block_to_rc "$ZSHRC" ;;
       *)
-        log "Target desconhecido: $t - pulando"
+        log "Target desconhecido: $t"
         ;;
     esac
   done
 
-  log "Instalação concluída. Consultar log em: $LOG_FILE"
-  echo
-  echo "Para aplicar imediatamente, execute:"
-  for t in "${targets[@]}"; do
-    if [ "$t" = "bash" ]; then
-      echo "  source ~/.bashrc"
-    elif [ "$t" = "zsh" ]; then
-      echo "  source ~/.zshrc"
-    fi
-  done
+  log "Instalação concluída. Log: $LOG_FILE"
+  echo "Para aplicar agora: source ~/.bashrc (ou source ~/.zshrc)"
 }
 
-# --- Desinstalar (reverte com base no manifest) ---
-perform_uninstall() {
-  ensure_dirs
+##########################
+# Uninstall: revert changes per manifest/backups
+##########################
+perform_uninstall(){
+  ensure_state
   if [ ! -s "$MANIFEST" ]; then
-    log "Manifest vazio — nada para desinstalar."
-    echo "Manifest vazio. Talvez o programa nunca tenha sido instalado por este script."
+    log "Manifest vazio — nada a desinstalar."
+    echo "Manifest vazio."
     return
   fi
 
@@ -487,14 +265,13 @@ perform_uninstall() {
   echo "=================================="
   read -rp "Confirma desinstalar e reverter tudo que aparece acima? (yes/no) " yn
   if [ "$yn" != "yes" ]; then
-    log "Desinstalação abortada pelo usuário."
-    echo "Abortado."
+    log "Desinstalação abortada"
     return
   fi
 
-  log "Iniciando desinstalação/reversão com base em $MANIFEST"
-
-  # Lê manifest de baixo para cima para desfazer na ordem inversa
+  # Restore RC backups if present, else remove markers
+  # We stored backup entries as BACKUP_RC <rc_file> <bkp_path>
+  # and APPENDED_RC <rc_file>
   tac "$MANIFEST" | while IFS= read -r line; do
     set -- $line
     cmd="$1"
@@ -503,85 +280,68 @@ perform_uninstall() {
         path="$2"
         if is_within_install_dir "$path" && [ -d "$path" ]; then
           rm -rf -- "$path"
-          log "Removido diretório criado: $path"
-        else
-          log "Ignorado (fora do install_dir ou não existe): $path"
+          log "Removido diretório: $path"
         fi
         ;;
       CREATED_FILE)
         path="$2"
         if is_within_install_dir "$path" && [ -f "$path" ]; then
           rm -f -- "$path"
-          log "Removido ficheiro criado: $path"
-        else
-          log "Ignorado (fora do install_dir ou não existe): $path"
-        fi
-        ;;
-      APPENDED_RC)
-        rc_file="$2"
-        shelltype="$3"
-        bkp="$(ls -1 "$BACKUP_DIR"/"$(basename "$rc_file")".bak.* 2>/dev/null | tail -n1 || true)"
-        if [ -n "$bkp" ] && [ -f "$bkp" ]; then
-          cp -- "$bkp" "$rc_file"
-          log "Restaurado $rc_file a partir de backup $bkp"
-        else
-          remove_marked_block "$rc_file"
+          log "Removido ficheiro: $path"
         fi
         ;;
       BACKUP_RC)
-        log "Backup marcado: $line"
+        # nothing to do here (handled by APPENDED_RC)
+        ;;
+      APPENDED_RC)
+        rc_file="$2"
+        # find latest backup for this rc
+        bkp="$(ls -1 "$BACKUP_DIR"/"$(basename "$rc_file")".bak.* 2>/dev/null | tail -n1 || true)"
+        if [ -n "$bkp" ] && [ -f "$bkp" ]; then
+          cp -- "$bkp" "$rc_file"
+          log "Restaurado $rc_file a partir do backup $bkp"
+        else
+          # simply delete the block markers if no backup found
+          sed -i "/$MARKER_BEGIN/,/$MARKER_END/d" "$rc_file" || true
+          log "Removido bloco DynamicBanners de $rc_file (sem backup)"
+        fi
         ;;
       *)
-        log "Entrada não reconhecida no manifest: $line"
+        log "Linha de manifest não reconhecida: $line"
         ;;
     esac
   done
 
-  # Apaga backups e manifest
-  if [ -d "$BACKUP_DIR" ]; then
-    rm -rf -- "$BACKUP_DIR"
-    log "Removido diretório de backups: $BACKUP_DIR"
-  fi
+  # remove backups and manifest
+  rm -rf -- "$BACKUP_DIR"
   rm -f -- "$MANIFEST"
-  log "Removido manifest: $MANIFEST"
+  log "Removidos backups e manifest"
 
-  # Opcional: pergunta para limpar log também
   read -rp "Deseja apagar o log ($LOG_FILE)? (yes/no) " yn2
-  if [ "$yn2" = "yes" ]; then
-    rm -f -- "$LOG_FILE"
-    log "Log apagado por solicitação do usuário."
-  else
-    log "Log mantido em $LOG_FILE"
-  fi
+  if [ "$yn2" = "yes" ]; then rm -f -- "$LOG_FILE"; log "Log apagado."; else log "Log mantido em $LOG_FILE"; fi
 
-  log "Desinstalação concluída."
+  log "Desinstalação concluída"
 }
 
-# --- Status e exibição de log ---
-show_status() {
-  echo "=== STATUS ==="
+##########################
+# Status & Log display
+##########################
+show_status(){
   echo "Install dir: $INSTALL_DIR"
   echo "Log file:    $LOG_FILE"
   echo "Manifest:    $MANIFEST"
   echo
-  echo "Arquivos/dirs criados (segundo manifest):"
-  if [ -s "$MANIFEST" ]; then
-    manifest_read
-  else
-    echo "(manifest vazio)"
-  fi
-  echo "=== FIM STATUS ==="
+  echo "Conteúdo do manifest (se existente):"
+  if [ -s "$MANIFEST" ]; then manifest_read; else echo "(manifest vazio)"; fi
 }
 
-show_log() {
-  if [ -f "$LOG_FILE" ]; then
-    less "$LOG_FILE"
-  else
-    echo "Nenhum log encontrado."
-  fi
+show_log(){
+  if [ -f "$LOG_FILE" ]; then less "$LOG_FILE"; else echo "Nenhum log."; fi
 }
 
-# --- Menu interativo ---
+##########################
+# CLI menu
+##########################
 while true; do
   cat <<EOF
 
@@ -593,7 +353,7 @@ DynamicBanners Manager
 5) Sair
 EOF
 
-  read -rp "Escolha uma opção [1-5]: " opt
+  read -rp "Escolha [1-5]: " opt
   case "$opt" in
     1) perform_install ;;
     2) perform_uninstall ;;
