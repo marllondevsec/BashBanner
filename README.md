@@ -1,5 +1,17 @@
 # BashBanner
 
+<p align="center">
+  <img src="assets/banner1.png" alt="Banner 1" width="300" />
+  <img src="assets/banner2.png" alt="Banner 2" width="300" />
+</p>
+
+<p align="center">
+  <img src="assets/banner3.png" alt="Banner 3" width="300" />
+  <img src="assets/banner4.png" alt="Banner 4" width="300" />
+</p>
+
+---
+
 BashBanner é um programa de gerenciamento dinâmico de banners para terminais Linux. Ele funciona em qualquer shell moderno compatível com **Bash** ou **Zsh** e foi desenvolvido para exibir banners visuais automaticamente ao entrar em diretórios específicos pelo terminal.
 
 > Um programa feito para aqueles que curtem um estilo minimalista mas estão cansados da monotonia do CLI. Com este simples programa você pode adicionar banners ao adentrar os principais diretórios do seu sistema operacional, podendo ainda colocar vários para o mesmo diretório — o banner muda a cada visita nova ao terminal.
