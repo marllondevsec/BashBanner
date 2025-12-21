@@ -1,63 +1,134 @@
-#BashBanner
+# BashBanner
 
-BashBanner é um programa de gerenciamento dinâmico de banners para terminais Linux. Ele funciona em qualquer shell moderno compatível com Bash ou Zsh e foi desenvolvido para exibir banners visuais automaticamente ao entrar em diretórios específicos pelo terminal.
+BashBanner é um programa de gerenciamento dinâmico de banners para terminais Linux. Ele funciona em qualquer shell moderno compatível com **Bash** ou **Zsh** e foi desenvolvido para exibir banners visuais automaticamente ao entrar em diretórios específicos pelo terminal.
 
-O objetivo do BashBanner é personalizar o ambiente do terminal, facilitar a identificação do diretório atual e oferecer uma experiência visual dinâmica sem interferir no funcionamento normal do sistema.
+> Um programa feito para aqueles que curtem um estilo minimalista mas estão cansados da monotonia do CLI. Com este simples programa você pode adicionar banners ao adentrar os principais diretórios do seu sistema operacional, podendo ainda colocar vários para o mesmo diretório — o banner muda a cada visita nova ao terminal.
 
-Novidades
+---
 
-A versão atual do BashBanner conta com detecção automática do shell do sistema, funcionando tanto em Bash quanto em Zsh sem necessidade de configuração manual. O programa possui suporte nativo a sistemas que utilizam diretórios em inglês ou português, garantindo compatibilidade total independentemente do idioma da distribuição Linux.
+## Novidades
 
-Foi adicionado um instalador inteligente que identifica o shell ativo, injeta apenas o código compatível e remove automaticamente trechos de código que não tenham portabilidade no sistema detectado. Também foi implementado um desinstalador universal capaz de reverter completamente todas as alterações feitas durante a instalação.
+* **Detecção automática do shell**: funciona tanto em Bash quanto em Zsh sem configuração manual.
+* **Compatibilidade PT-BR / EN**: detecta diretórios padrões (XDG) tanto em português quanto em inglês.
+* **Instalador inteligente**: injeta apenas o código compatível com o shell detectado e cria backup automático dos arquivos de inicialização.
+* **Desinstalador reversível**: restaura arquivos a partir dos backups e remove tudo que foi adicionado.
+* **Banner de inicialização**: o diretório `bannerstartup` permite exibir um banner sempre que o terminal é aberto — apenas **uma vez por sessão**.
 
-O diretório bannerstartup foi introduzido para permitir a exibição de banners sempre que o terminal é aberto, sem que o banner seja reexecutado ao entrar no diretório home.
+---
 
-Como o BashBanner funciona
+## Como funciona
 
-O BashBanner funciona adicionando um bloco de código controlado ao arquivo de inicialização do shell do usuário. Em sistemas Bash, o código é inserido no arquivo .bashrc. Em sistemas Zsh, o código é inserido no arquivo .zshrc.
+O BashBanner injeta um bloco de código controlado no arquivo de inicialização do usuário (`~/.bashrc` ou `~/.zshrc`). Esse bloco:
 
-Esse bloco de código detecta automaticamente o diretório atual do usuário no terminal. Ao identificar a mudança de diretório, o programa verifica se existe um diretório de banners correspondente. Caso exista, um banner em formato .txt é escolhido aleatoriamente e exibido no terminal.
+1. Resolve os diretórios XDG do usuário (Desktop, Documents, Downloads, etc.).
+2. Monitora mudanças de diretório (via `chpwd` no Zsh e `PROMPT_COMMAND` no Bash).
+3. Ao detectar o diretório atual, escolhe aleatoriamente um arquivo `.txt` dentro da pasta de banners correspondente e o exibe no terminal.
 
-No Zsh, o mecanismo de detecção é feito através do hook chpwd. No Bash, a detecção é feita utilizando o PROMPT_COMMAND. Nenhum comando essencial do sistema é sobrescrito ou modificado.
+O `bannerstartup` é tratado de forma especial: quando o shell é interativo e o arquivo de inicialização é carregado, um banner aleatório de `bannerstartup` é exibido **uma única vez**.
 
-Estrutura de diretórios
+---
 
-Após a instalação, os diretórios de banners são criados no mesmo local onde o instalador foi executado. Cada diretório representa um local comum do sistema operacional.
+## Estrutura de diretórios (após instalação)
 
-O diretório bannerstartup é usado para banners exibidos apenas ao abrir o terminal. Os diretórios bannerdesktop, bannerdocuments, bannerdownloads, bannerpictures, bannermusic, bannervideos, bannerpublico e bannertemplates correspondem aos diretórios padrão do usuário, como Desktop, Documentos, Downloads, Imagens, Músicas, Vídeos, Público e Modelos.
+No mesmo diretório onde você instalou o BashBanner serão criadas pastas de banners:
 
-Para adicionar banners, basta colocar arquivos .txt dentro do diretório correspondente. O programa escolherá automaticamente um banner aleatório sempre que o diretório for acessado.
+```
+assets/             # assets do projeto (imagens, etc.)
+bannerstartup/      # banners mostrados ao abrir o terminal (uma vez por sessão)
+bannerdesktop/
+Bannerdocuments/
+bannerdownloads/
+bannerpictures/
+bannermusic/
+bannervideos/
+bannerpublico/
+bannertemplates/
+```
 
-Compatibilidade com idiomas
+> Para adicionar banners basta colocar arquivos `*.txt` dentro da pasta desejada. Cada arquivo `*.txt` é um banner (ASCII art, mensagem, etc.).
 
-O BashBanner é compatível com sistemas configurados em português ou inglês. Ele utiliza o padrão XDG para detectar os diretórios reais do usuário, como Documentos ou Documents, Músicas ou Music, Vídeos ou Videos, entre outros.
+---
 
-Essa detecção é automática e não exige nenhuma configuração adicional por parte do usuário.
+## Instalação
 
-Instalação
+1. Clone o repositório:
 
-Após clonar o repositório, o programa pode ser instalado executando o script de instalação. O instalador detecta automaticamente o shell padrão do sistema e realiza apenas as alterações necessárias para aquele ambiente.
+```bash
+git clone <repo-url>
+cd <repo>
+```
 
-Após a instalação, é recomendado recarregar o shell para que as alterações tenham efeito. Isso pode ser feito fechando e abrindo o terminal ou executando o comando source no arquivo de inicialização do shell correspondente.
+2. Execute o gerenciador:
 
-Banner de inicialização
+```bash
+./BashBanner0.1.sh
+```
 
-O diretório bannerstartup é responsável pelos banners exibidos ao abrir o terminal. Esses banners são mostrados apenas uma vez por sessão e não são reexibidos ao navegar pelo diretório home. Isso evita poluição visual e repetição excessiva de banners.
+O instalador irá:
 
-Desinstalação
+* Criar os diretórios de banners (se ainda não existirem).
+* Fazer backup do seu `~/.bashrc` e/ou `~/.zshrc`.
+* Injetar o bloco idempotente que mostra os banners.
 
-O BashBanner inclui um desinstalador universal que pode ser executado da mesma forma que o instalador. O desinstalador remove todos os diretórios criados pelo programa, restaura os arquivos de inicialização do shell a partir de backups e elimina completamente qualquer código injetado.
+Depois de instalado, recarregue o shell com `source ~/.bashrc` ou abra um novo terminal.
 
-Caso seja necessário verificar manualmente, o código do BashBanner sempre é adicionado ao final do arquivo de inicialização do shell e pode ser removido facilmente.
+---
 
-Segurança e portabilidade
+## Uso
 
-O BashBanner não utiliza permissões administrativas, não altera variáveis críticas do sistema, não modifica o PATH e não instala binários globais. Todas as alterações são locais ao usuário e totalmente reversíveis.
+* Coloque arquivos `.txt` com arte ASCII ou mensagens dentro das pastas `banner*` correspondentes.
+* Ao abrir o terminal, um banner aleatório de `bannerstartup` será exibido (apenas uma vez por sessão).
+* Ao navegar para `Downloads`, `Documents`, `Pictures`, etc., um banner aleatório daquele diretório será exibido.
 
-O programa foi desenvolvido com foco em portabilidade, segurança e controle total por parte do usuário.
+---
 
-Finalidade
+## Imagens (exemplos)
 
-O BashBanner é ideal para usuários que desejam personalizar o terminal, desenvolvedores que passam longos períodos no shell, ambientes educacionais, laboratórios ou simplesmente para quem deseja tornar o terminal mais informativo e visualmente agradável.
+Abaixo estão quatro imagens de demonstração localizadas na pasta `assets` do repositório:
 
-BashBanner oferece banners dinâmicos, portáveis e sob total controle do usuário.
+<p align="center">
+  <img src="assets/banner1.png" alt="Banner 1" width="300" />
+  <img src="assets/banner2.png" alt="Banner 2" width="300" />
+</p>
+
+<p align="center">
+  <img src="assets/banner3.png" alt="Banner 3" width="300" />
+  <img src="assets/banner4.png" alt="Banner 4" width="300" />
+</p>
+
+> Substitua as extensões das imagens se necessário (ex.: `.jpg`, `.jpeg`, `.png`).
+
+---
+
+## Compatibilidade e segurança
+
+* Não requer permissões administrativas.
+* Não instala binários globais.
+* Todas as modificações são locais ao usuário e reversíveis pelo desinstalador.
+* O bloco injetado evita sobrescrever variáveis essenciais e é idempotente (pode ser re-aplicado sem duplicação).
+
+---
+
+## Desinstalação
+
+Execute o script e escolha a opção de desinstalar — o manifest e os backups serão usados para restaurar o estado anterior do seu `~/.bashrc`/`~/.zshrc`.
+
+---
+
+## Contribuição
+
+Contribuições são bem-vindas. Sugestões:
+
+* Adicionar opções de configuração (ex.: modo silencioso, preferência por não limpar a tela).
+* Suporte a themes por diretório.
+* Integração com gerenciadores de dotfiles.
+
+---
+
+## Licença
+
+Escolha a licença que preferir (MIT é recomendada para projetos pessoais e utilitários).
+
+---
+
+Se quiser, eu adapto o README em inglês, gero um `CHANGELOG.md` com as novidades, ou crio um `CONTRIBUTING.md` com padrões para patches. Basta me dizer qual próximo passo você prefere.
