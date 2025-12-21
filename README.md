@@ -94,24 +94,6 @@ Depois de instalado, recarregue o shell com `source ~/.bashrc` ou abra um novo t
 
 ---
 
-## Imagens (exemplos)
-
-Abaixo estão quatro imagens de demonstração localizadas na pasta `assets` do repositório:
-
-<p align="center">
-  <img src="assets/banner1.png" alt="Banner 1" width="300" />
-  <img src="assets/banner2.png" alt="Banner 2" width="300" />
-</p>
-
-<p align="center">
-  <img src="assets/banner3.png" alt="Banner 3" width="300" />
-  <img src="assets/banner4.png" alt="Banner 4" width="300" />
-</p>
-
-> Substitua as extensões das imagens se necessário (ex.: `.jpg`, `.jpeg`, `.png`).
-
----
-
 ## Compatibilidade e segurança
 
 * Não requer permissões administrativas.
