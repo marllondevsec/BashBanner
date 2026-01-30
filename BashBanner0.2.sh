@@ -1,382 +1,1117 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# BashBanner0.2.sh
-# Manager interativo para DynamicBanners
-# - detecta XDG dirs (PT-BR/EN)
-# - mostra banners ao entrar em dirs do usuário OU nas pastas do projeto
-# - logging, manifest, backup, uninstall reversível
-# - injeção idempotente no ~/.bashrc ou ~/.zshrc
+# install_bashbanner.sh - Menu interativo colorido
+# Reversible installer for BashBanner (user-mode).
 
-##########################
-# Config
-##########################
-INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOG_FILE="$INSTALL_DIR/dynamicbanners.log"
-MANIFEST="$INSTALL_DIR/.dynamicbanners_manifest"
-BACKUP_DIR="$INSTALL_DIR/backups"
-MARKER_BEGIN="# BEGIN DynamicBanners"
-MARKER_END="# END DynamicBanners"
+# Cores para o menu
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+CYAN='\033[0;36m'
+WHITE='\033[1;37m'
+NC='\033[0m' # No Color
+BOLD='\033[1m'
+DIM='\033[2m'
 
-USER_BANNER_DIRS=( bannerstartup bannerpictures bannerdocuments bannerdownloads bannertemplates bannermusic bannervideos bannerpublico bannerdesktop )
+# Cores para status
+SUCCESS="${GREEN}✓${NC}"
+INFO="${CYAN}ℹ${NC}"
+WARNING="${YELLOW}⚠${NC}"
+ERROR="${RED}✗${NC}"
 
-BASHRC="$HOME/.bashrc"
-ZSHRC="$HOME/.zshrc"
+# Configuração
+PREFIX="${PREFIX:-$HOME/.local}"
+BIN_DIR="$PREFIX/bin"
+CONF_DIR="$HOME/.config/bashbanner"
+BACKUP_DIR="$CONF_DIR/backups"
+MANIFEST="$CONF_DIR/manifest.txt"
+SYSTEMD_UNIT_DIR="$HOME/.config/systemd/user"
+SYSTEMD_UNIT="$SYSTEMD_UNIT_DIR/bashbanner.service"
+HOOK_SH="$CONF_DIR/hook.sh"
+BASHBANNER_BIN="$BIN_DIR/bashbanner"
 
-##########################
-# Helpers
-##########################
-timestamp(){ date +"%Y-%m-%d %H:%M:%S"; }
-log(){
-  printf '%s %s\n' "$(timestamp)" "$*" | tee -a "$LOG_FILE"
+# Lista de pastas de banners
+BANNER_DIRS=(
+    "bannerstartup"      # Banners de inicialização
+    "bannerdesktop"      # Banners para Desktop
+    "bannerdownloads"    # Banners para Downloads
+    "bannerdocuments"    # Banners para Documents
+    "bannerpictures"     # Banners para Pictures
+    "bannermusic"        # Banners para Music
+    "bannervideos"       # Banners para Videos
+    "bannerpublico"      # Banners para Public
+    "bannertemplates"    # Banners para Templates
+)
+
+# Descrições das pastas
+declare -A BANNER_DESCRIPTIONS=(
+    ["bannerstartup"]="Exibido no login/inicialização"
+    ["bannerdesktop"]="Ao entrar na pasta Desktop"
+    ["bannerdownloads"]="Ao entrar na pasta Downloads"
+    ["bannerdocuments"]="Ao entrar na pasta Documents"
+    ["bannerpictures"]="Ao entrar na pasta Pictures"
+    ["bannermusic"]="Ao entrar na pasta Music"
+    ["bannervideos"]="Ao entrar na pasta Videos"
+    ["bannerpublico"]="Ao entrar na pasta Public"
+    ["bannertemplates"]="Ao entrar na pasta Templates"
+)
+
+# Variáveis do menu
+ENABLE_SYSTEMD=false
+ENABLE_HOOK=false
+MODIFY_RC=true
+SELECTED_ACTION=""
+
+# Banner do menu colorido alternativo
+show_banner() {
+  clear
+  echo -e "${MAGENTA}${BOLD}"
+  echo -e "╔══════════════════════════════════════════════════════════════════╗"
+  echo -e "║${CYAN}                                                                    ${MAGENTA}║"
+  echo -e "║${YELLOW} 8                    8      8                                      ${MAGENTA}║"
+  echo -e "║${GREEN} 8                    8      8                                      ${MAGENTA}║"
+  echo -e "║${BLUE} 8oPYo. .oPYo. .oPYo. 8oPYo. 8oPYo. .oPYo. odYo. odYo. .oPYo. oPYo. ${MAGENTA}║"
+  echo -e "║${CYAN} 8    8 .oooo8 Yb..   8    8 8    8 .oooo8 8' \`8 8' \`8 8oooo8 8  \`' ${MAGENTA}║"
+  echo -e "║${RED} 8    8 8    8   'Yb. 8    8 8    8 8    8 8   8 8   8 8.     8     ${MAGENTA}║"
+  echo -e "║${GREEN} \`YooP' \`YooP8 \`YooP' 8    8 \`YooP' \`YooP8 8   8 8   8 \`Yooo' 8     ${MAGENTA}║"
+  echo -e "║${YELLOW} :.....::.....::.....:..:::..:.....::.....:..::....::..:.....:..:::: ${MAGENTA}║"
+  echo -e "║${BLUE} ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: ${MAGENTA}║"
+  echo -e "║${CYAN} ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: ${MAGENTA}║"
+  echo -e "║                                                                    ${MAGENTA}║"
+  echo -e "║${WHITE}              INSTALADOR REVERSÍVEL - MENU INTERATIVO               ${MAGENTA}║"
+  echo -e "╚══════════════════════════════════════════════════════════════════╝${NC}"
+  echo
 }
-ensure_state(){
-  mkdir -p "$BACKUP_DIR"
-  touch "$LOG_FILE"
-  touch "$MANIFEST"
-}
-manifest_add(){ printf '%s\n' "$*" >> "$MANIFEST"; }
-manifest_read(){ [ -f "$MANIFEST" ] && cat "$MANIFEST" || true; }
-manifest_clear(){ rm -f "$MANIFEST"; touch "$MANIFEST"; }
 
-# Safe absolute resolution for path check
-is_within_install_dir(){
-  local p="$1"
-  local install_abs target_abs
-  install_abs="$(cd "$INSTALL_DIR" >/dev/null 2>&1 && pwd)"
-  target_abs="$(cd "$(dirname "$p")" >/dev/null 2>&1 && pwd)/$(basename "$p")"
-  case "$target_abs" in
-    "$install_abs" | "$install_abs"/*) return 0 ;;
-    *) return 1 ;;
-  esac
+# Linha divisória
+show_separator() {
+  echo -e "${DIM}────────────────────────────────────────────────────────────${NC}"
 }
 
-##########################
-# Create banner folders (installer-side)
-##########################
-create_banner_dirs(){
-  for d in "${USER_BANNER_DIRS[@]}"; do
-    local path="$INSTALL_DIR/$d"
-    if [ ! -d "$path" ]; then
-      mkdir -p "$path"
-      manifest_add "CREATED_DIR $path"
-      log "Criado diretório: $path"
-    else
-      log "Diretório já existe: $path"
+# Mostra mensagem de status
+show_status() {
+  echo -e "\n${SUCCESS} $1"
+}
+
+show_error() {
+  echo -e "\n${ERROR} $1"
+}
+
+show_info() {
+  echo -e "\n${INFO} $1"
+}
+
+# Função para listar pastas de banners
+list_banner_dirs() {
+    echo -e "${BOLD}${WHITE}Pastas de banners disponíveis:${NC}\n"
+    
+    for i in "${!BANNER_DIRS[@]}"; do
+        local dir="${BANNER_DIRS[$i]}"
+        local full_path="$CONF_DIR/$dir"
+        local banner_count=0
+        
+        if [ -d "$full_path" ]; then
+            banner_count=$(find "$full_path" -name "*.txt" -type f 2>/dev/null | wc -l)
+            local count_color="${GREEN}"
+            if [ "$banner_count" -eq 0 ]; then
+                count_color="${RED}"
+            fi
+            echo -e "  ${BOLD}$((i+1)))${NC} ${CYAN}$dir${NC}"
+            echo -e "     ${DIM}${BANNER_DESCRIPTIONS[$dir]}${NC}"
+            echo -e "     ${DIM}Banners: ${count_color}${banner_count} arquivo(s)${NC}"
+        else
+            echo -e "  ${BOLD}$((i+1)))${NC} ${DIM}$dir${NC} (${RED}não criada${NC})"
+        fi
+        echo
+    done
+}
+
+# Função para selecionar pasta de banner
+select_banner_dir() {
+    local selected_index
+    
+    while true; do
+        clear
+        show_banner
+        echo -e "\n${BOLD}${WHITE}Selecionar pasta de banner:${NC}\n"
+        
+        list_banner_dirs
+        echo -e "  ${BOLD}0)${NC} ${BLUE}Voltar ao menu anterior${NC}"
+        
+        show_separator
+        read -p "$(echo -e "${BOLD}${WHITE}Escolha uma pasta [0-${#BANNER_DIRS[@]}]: ${NC}")" selected_index
+        
+        if [[ "$selected_index" == "0" ]]; then
+            return 1
+        fi
+        
+        if [[ "$selected_index" =~ ^[0-9]+$ ]] && [ "$selected_index" -ge 1 ] && [ "$selected_index" -le "${#BANNER_DIRS[@]}" ]; then
+            local dir_index=$((selected_index-1))
+            SELECTED_BANNER_DIR="${BANNER_DIRS[$dir_index]}"
+            SELECTED_BANNER_PATH="$CONF_DIR/$SELECTED_BANNER_DIR"
+            
+            # Criar diretório se não existir
+            if [ ! -d "$SELECTED_BANNER_PATH" ]; then
+                mkdir -p "$SELECTED_BANNER_PATH"
+                echo -e "\n${SUCCESS} Pasta ${CYAN}$SELECTED_BANNER_DIR${NC} criada."
+                sleep 1
+            fi
+            
+            return 0
+        else
+            echo -e "\n${ERROR} Opção inválida! Tente novamente."
+            sleep 1
+        fi
+    done
+}
+
+# Função para adicionar banner
+add_banner() {
+    if ! select_banner_dir; then
+        return
     fi
+    
+    clear
+    show_banner
+    echo -e "\n${BOLD}${WHITE}Adicionar banner à pasta: ${CYAN}$SELECTED_BANNER_DIR${NC}\n"
+    
+    echo -e "${DIM}Digite o nome do arquivo (sem extensão .txt):${NC}"
+    read -p "Nome: " banner_name
+    
+    # Remover espaços e caracteres especiais
+    banner_name=$(echo "$banner_name" | tr -s ' ' | tr ' ' '_' | tr -cd '[:alnum:]._-')
+    
+    if [ -z "$banner_name" ]; then
+        banner_name="banner_$(date +%s)"
+    fi
+    
+    local banner_file="$SELECTED_BANNER_PATH/${banner_name}.txt"
+    
+    if [ -f "$banner_file" ]; then
+        echo -e "\n${WARNING} O arquivo ${banner_name}.txt já existe."
+        read -p "Deseja sobrescrever? (s/N): " overwrite
+        if [[ ! "$overwrite" =~ ^[SsYy]$ ]]; then
+            return
+        fi
+    fi
+    
+    echo -e "\n${DIM}Digite o conteúdo do banner (pressione Ctrl+D quando terminar):${NC}"
+    echo -e "${GREEN}(Você pode usar caracteres ASCII, caixas, etc.)${NC}\n"
+    echo -e "${YELLOW}--- Comece a digitar abaixo ---${NC}"
+    
+    # Usar cat para permitir múltiplas linhas
+    cat > "$banner_file"
+    
+    if [ -s "$banner_file" ]; then
+        echo -e "\n${SUCCESS} Banner salvo em: ${CYAN}$banner_file${NC}"
+        
+        # Mostrar preview
+        echo -e "\n${DIM}Preview:${NC}"
+        echo -e "${BLUE}════════════════════════════════${NC}"
+        cat "$banner_file"
+        echo -e "${BLUE}════════════════════════════════${NC}"
+    else
+        rm -f "$banner_file"
+        echo -e "\n${ERROR} Banner vazio. Nada foi salvo."
+    fi
+    
+    pause_screen
+}
+
+# Função para ver banners
+view_banners() {
+    if ! select_banner_dir; then
+        return
+    fi
+    
+    clear
+    show_banner
+    echo -e "\n${BOLD}${WHITE}Banners na pasta: ${CYAN}$SELECTED_BANNER_DIR${NC}\n"
+    
+    local banners=()
+    if [ -d "$SELECTED_BANNER_PATH" ]; then
+        mapfile -t banners < <(find "$SELECTED_BANNER_PATH" -name "*.txt" -type f 2>/dev/null | sort)
+    fi
+    
+    if [ ${#banners[@]} -eq 0 ]; then
+        echo -e "${YELLOW}Nenhum banner encontrado nesta pasta.${NC}"
+        pause_screen
+        return
+    fi
+    
+    while true; do
+        clear
+        show_banner
+        echo -e "\n${BOLD}${WHITE}Selecionar banner para visualizar:${NC}\n"
+        
+        for i in "${!banners[@]}"; do
+            local banner="${banners[$i]}"
+            local banner_name=$(basename "$banner")
+            local line_count=$(wc -l < "$banner" 2>/dev/null || echo 0)
+            local size=$(stat -c%s "$banner" 2>/dev/null || echo 0)
+            
+            echo -e "  ${BOLD}$((i+1)))${NC} ${CYAN}$banner_name${NC}"
+            echo -e "     ${DIM}Linhas: $line_count | Tamanho: ${size}B${NC}"
+        done
+        
+        echo -e "\n  ${BOLD}0)${NC} ${BLUE}Voltar ao menu anterior${NC}"
+        
+        show_separator
+        read -p "$(echo -e "${BOLD}${WHITE}Escolha um banner [0-${#banners[@]}]: ${NC}")" choice
+        
+        if [[ "$choice" == "0" ]]; then
+            return
+        fi
+        
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#banners[@]}" ]; then
+            local banner_index=$((choice-1))
+            local selected_banner="${banners[$banner_index]}"
+            
+            clear
+            show_banner
+            echo -e "\n${BOLD}${WHITE}Banner: ${CYAN}$(basename "$selected_banner")${NC}\n"
+            echo -e "${DIM}Caminho: $selected_banner${NC}"
+            echo -e "${DIM}Pasta: $SELECTED_BANNER_DIR${NC}"
+            echo -e "\n${GREEN}Conteúdo:${NC}"
+            echo -e "${BLUE}════════════════════════════════════════${NC}"
+            cat "$selected_banner"
+            echo -e "${BLUE}════════════════════════════════════════${NC}"
+            
+            echo -e "\n${DIM}Pressione Enter para continuar...${NC}"
+            read -r
+        else
+            echo -e "\n${ERROR} Opção inválida!"
+            sleep 1
+        fi
+    done
+}
+
+# Função para remover banner
+remove_banner() {
+    if ! select_banner_dir; then
+        return
+    fi
+    
+    clear
+    show_banner
+    echo -e "\n${BOLD}${WHITE}Remover banner da pasta: ${CYAN}$SELECTED_BANNER_DIR${NC}\n"
+    
+    local banners=()
+    if [ -d "$SELECTED_BANNER_PATH" ]; then
+        mapfile -t banners < <(find "$SELECTED_BANNER_PATH" -name "*.txt" -type f 2>/dev/null | sort)
+    fi
+    
+    if [ ${#banners[@]} -eq 0 ]; then
+        echo -e "${YELLOW}Nenhum banner encontrado nesta pasta.${NC}"
+        pause_screen
+        return
+    fi
+    
+    while true; do
+        clear
+        show_banner
+        echo -e "\n${BOLD}${WHITE}Selecionar banner para remover:${NC}\n"
+        
+        for i in "${!banners[@]}"; do
+            local banner="${banners[$i]}"
+            local banner_name=$(basename "$banner")
+            echo -e "  ${BOLD}$((i+1)))${NC} ${CYAN}$banner_name${NC}"
+        done
+        
+        echo -e "\n  ${BOLD}A)${NC} ${RED}Remover TODOS os banners desta pasta${NC}"
+        echo -e "  ${BOLD}0)${NC} ${BLUE}Voltar ao menu anterior${NC}"
+        
+        show_separator
+        read -p "$(echo -e "${BOLD}${WHITE}Escolha uma opção [0-${#banners[@]}, A]: ${NC}")" choice
+        
+        if [[ "$choice" == "0" ]]; then
+            return
+        fi
+        
+        if [[ "$choice" == "A" || "$choice" == "a" ]]; then
+            echo -e "\n${RED}⚠ ATENÇÃO! ⚠${NC}"
+            echo -e "Você está prestes a remover TODOS os ${#banners[@]} banners da pasta ${CYAN}$SELECTED_BANNER_DIR${NC}."
+            read -p "$(echo -e "${BOLD}Tem certeza? (s/N): ${NC}")" confirm
+            if [[ "$confirm" =~ ^[SsYy]$ ]]; then
+                rm -f "${SELECTED_BANNER_PATH}"/*.txt 2>/dev/null
+                echo -e "\n${SUCCESS} Todos os banners foram removidos."
+                pause_screen
+                return
+            fi
+            continue
+        fi
+        
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#banners[@]}" ]; then
+            local banner_index=$((choice-1))
+            local selected_banner="${banners[$banner_index]}"
+            
+            echo -e "\n${YELLOW}Preview do banner a ser removido:${NC}"
+            echo -e "${DIM}────────────────────────────────${NC}"
+            head -10 "$selected_banner"
+            echo -e "${DIM}────────────────────────────────${NC}"
+            
+            read -p "$(echo -e "${BOLD}Remover este banner? (s/N): ${NC}")" confirm
+            if [[ "$confirm" =~ ^[SsYy]$ ]]; then
+                rm -f "$selected_banner"
+                echo -e "\n${SUCCESS} Banner removido com sucesso."
+                
+                # Atualizar lista
+                mapfile -t banners < <(find "$SELECTED_BANNER_PATH" -name "*.txt" -type f 2>/dev/null | sort)
+                if [ ${#banners[@]} -eq 0 ]; then
+                    echo -e "${YELLOW}A pasta agora está vazia.${NC}"
+                    pause_screen
+                    return
+                fi
+            fi
+            pause_screen
+        else
+            echo -e "\n${ERROR} Opção inválida!"
+            sleep 1
+        fi
+    done
+}
+
+# Função para testar banner
+test_banner() {
+    if ! select_banner_dir; then
+        return
+    fi
+    
+    clear
+    show_banner
+    echo -e "\n${BOLD}${WHITE}Testar banner da pasta: ${CYAN}$SELECTED_BANNER_DIR${NC}\n"
+    
+    if [ -d "$SELECTED_BANNER_PATH" ] && [ -x "$BASHBANNER_BIN" ]; then
+        echo -e "${DIM}Executando teste...${NC}\n"
+        
+        if [ "$SELECTED_BANNER_DIR" == "bannerstartup" ]; then
+            "$BASHBANNER_BIN" --startup
+        else
+            # Determinar diretório para teste baseado no nome da pasta
+            local test_dir=""
+            case "$SELECTED_BANNER_DIR" in
+                bannerdesktop) test_dir="$HOME/Desktop" ;;
+                bannerdownloads) test_dir="$HOME/Downloads" ;;
+                bannerdocuments) test_dir="$HOME/Documents" ;;
+                bannerpictures) test_dir="$HOME/Pictures" ;;
+                bannermusic) test_dir="$HOME/Music" ;;
+                bannervideos) test_dir="$HOME/Videos" ;;
+                bannerpublico) test_dir="$HOME/Public" ;;
+                bannertemplates) test_dir="$HOME/Templates" ;;
+                *) test_dir="$HOME" ;;
+            esac
+            
+            if [ -d "$test_dir" ]; then
+                echo -e "${DIM}Testando para diretório: $test_dir${NC}\n"
+                "$BASHBANNER_BIN" --dir "$test_dir"
+            else
+                echo -e "${YELLOW}Diretório $test_dir não existe.${NC}"
+                echo -e "${DIM}Testando com diretório atual...${NC}\n"
+                "$BASHBANNER_BIN" --dir "$PWD"
+            fi
+        fi
+        
+        echo -e "\n${GREEN}✓ Teste concluído.${NC}"
+    else
+        echo -e "${ERROR} Não foi possível executar o teste."
+        echo -e "${DIM}Verifique se o BashBanner está instalado corretamente.${NC}"
+    fi
+    
+    pause_screen
+}
+
+# Menu de gerenciamento de banners
+manage_banners() {
+    while true; do
+        clear
+        show_banner
+        echo -e "\n${BOLD}${WHITE}Gerenciamento de Banners${NC}\n"
+        
+        # Contar banners totais
+        local total_banners=0
+        for dir in "${BANNER_DIRS[@]}"; do
+            if [ -d "$CONF_DIR/$dir" ]; then
+                local count=$(find "$CONF_DIR/$dir" -name "*.txt" -type f 2>/dev/null | wc -l)
+                total_banners=$((total_banners + count))
+            fi
+        done
+        
+        echo -e "${DIM}Banners totais no sistema: ${CYAN}$total_banners${NC}\n"
+        
+        echo -e "   ${BOLD}1)${NC} ${GREEN}Adicionar novo banner${NC}"
+        echo -e "   ${BOLD}2)${NC} ${CYAN}Visualizar banners existentes${NC}"
+        echo -e "   ${BOLD}3)${NC} ${RED}Remover banner${NC}"
+        echo -e "   ${BOLD}4)${NC} ${YELLOW}Testar banner${NC}"
+        echo -e "   ${BOLD}5)${NC} ${MAGENTA}Listar todas as pastas${NC}"
+        echo -e "\n   ${BOLD}0)${NC} ${BLUE}Voltar ao menu principal${NC}"
+        
+        show_separator
+        read -p "$(echo -e "${BOLD}${WHITE}Escolha uma opção [0-5]: ${NC}")" choice
+        
+        case $choice in
+            1) add_banner ;;
+            2) view_banners ;;
+            3) remove_banner ;;
+            4) test_banner ;;
+            5)
+                clear
+                show_banner
+                echo -e "\n${BOLD}${WHITE}Pastas de banners:${NC}\n"
+                list_banner_dirs
+                pause_screen
+                ;;
+            0) return 0 ;;
+            *)
+                echo -e "\n${ERROR} Opção inválida!"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+# Menu principal interativo
+show_menu() {
+  while true; do
+    show_banner
+    
+    echo -e "\n${BOLD}${WHITE}Selecione uma ação:${NC}\n"
+    
+    # Mostra status atual das opções
+    local systemd_status
+    local hook_status
+    local rc_status
+    
+    if [ "$ENABLE_SYSTEMD" = true ]; then
+      systemd_status="${GREEN}● ATIVADO${NC}"
+    else
+      systemd_status="${DIM}○ DESATIVADO${NC}"
+    fi
+    
+    if [ "$ENABLE_HOOK" = true ]; then
+      hook_status="${GREEN}● ATIVADO${NC}"
+    else
+      hook_status="${DIM}○ DESATIVADO${NC}"
+    fi
+    
+    if [ "$MODIFY_RC" = true ]; then
+      rc_status="${GREEN}● ATIVADO${NC}"
+    else
+      rc_status="${DIM}○ DESATIVADO${NC}"
+    fi
+    
+    echo -e "   ${BOLD}1)${NC} ${CYAN}Instalar BashBanner${NC}"
+    echo -e "      ${DIM}Opções:${NC}"
+    echo -e "        a) Systemd User Unit: ${systemd_status}"
+    echo -e "        b) Hook Shell: ${hook_status}"
+    echo -e "        c) Modificar RC files: ${rc_status}"
+    
+    echo -e "\n   ${BOLD}2)${NC} ${YELLOW}Configurar opções${NC}"
+    echo -e "\n   ${BOLD}3)${NC} ${MAGENTA}Gerenciar banners${NC}"
+    echo -e "      ${DIM}Adicionar/visualizar/remover banners${NC}"
+    
+    echo -e "\n   ${BOLD}4)${NC} ${RED}Desinstalar${NC}"
+    echo -e "\n   ${BOLD}5)${NC} ${GREEN}Mostrar informações${NC}"
+    echo -e "\n   ${BOLD}6)${NC} ${BLUE}Sair${NC}"
+    
+    show_separator
+    
+    read -p "$(echo -e "${BOLD}${WHITE}Escolha [1-6]: ${NC}")" choice
+    
+    case $choice in
+      1)
+        SELECTED_ACTION="install"
+        if confirm_action "Instalar BashBanner com as opções atuais?"; then
+          execute_installation
+          pause_screen
+        fi
+        ;;
+      2)
+        configure_options
+        ;;
+      3)
+        manage_banners
+        ;;
+      4)
+        SELECTED_ACTION="uninstall"
+        if confirm_action "Tem certeza que deseja desinstalar o BashBanner?"; then
+          execute_uninstallation
+          pause_screen
+        fi
+        ;;
+      5)
+        show_information
+        pause_screen
+        ;;
+      6)
+        echo -e "\n${SUCCESS} Saindo... Até logo!${NC}"
+        exit 0
+        ;;
+      *)
+        echo -e "\n${ERROR} Opção inválida! Tente novamente.${NC}"
+        sleep 1
+        ;;
+    esac
   done
 }
 
-##########################
-# Generate injected shell block (idempotent)
-# We'll remove any previous DynamicBanners block before appending.
-##########################
-generate_injected_block(){
-  # This is a POSIX-friendly block that works in both bash and zsh.
-  # It sets a safe PATH prefix, resolves XDG dirs once, and defines a robust
-  # function to pick a random .txt banner using find + shuf / fallback.
-  cat <<'EOF'
-# BEGIN DynamicBanners
-# DynamicBanners injected by BashBanner0.2
-# Ensure minimal PATH so builtin utilities are available even early.
-export PATH="/usr/bin:/bin:$PATH"
+# Confirmar ação
+confirm_action() {
+  local message="$1"
+  echo -e "\n${YELLOW}${message}${NC}"
+  read -p "$(echo -e "${BOLD}(s/N): ${NC}")" confirm
+  [[ "$confirm" =~ ^[SsYy]$ ]]
+}
 
-SCRIPT_DIR="__INSTALL_DIR__"
+# Pausar tela
+pause_screen() {
+  echo -e "\n${DIM}Pressione Enter para continuar...${NC}"
+  read -r
+}
 
-# Resolve XDG-user-dirs if present, otherwise fallbacks
-if [ -f "$HOME/.config/user-dirs.dirs" ]; then
-  # shellcheck disable=SC1090
-  . "$HOME/.config/user-dirs.dirs"
+# Configurar opções (mantida igual)
+configure_options() {
+  while true; do
+    show_banner
+    echo -e "\n${BOLD}${WHITE}Configurar Opções:${NC}\n"
+    
+    # Systemd
+    if [ "$ENABLE_SYSTEMD" = true ]; then
+      echo -e "   ${BOLD}1)${NC} Systemd User Unit: ${GREEN}[X] ATIVADO${NC}"
+    else
+      echo -e "   ${BOLD}1)${NC} Systemd User Unit: [ ] DESATIVADO"
+    fi
+    echo -e "   ${DIM}   Executa banner no login via systemd${NC}"
+    
+    # Hook
+    if [ "$ENABLE_HOOK" = true ]; then
+      echo -e "\n   ${BOLD}2)${NC} Hook Shell: ${GREEN}[X] ATIVADO${NC}"
+    else
+      echo -e "\n   ${BOLD}2)${NC} Hook Shell: [ ] DESATIVADO"
+    fi
+    echo -e "   ${DIM}   Mostra banner ao mudar de diretório${NC}"
+    
+    # Modificar RC (só aparece se hook ativado)
+    if [ "$ENABLE_HOOK" = true ]; then
+      if [ "$MODIFY_RC" = true ]; then
+        echo -e "\n   ${BOLD}3)${NC} Modificar RC files: ${GREEN}[X] ATIVADO${NC}"
+      else
+        echo -e "\n   ${BOLD}3)${NC} Modificar RC files: [ ] DESATIVADO"
+      fi
+      echo -e "   ${DIM}   Adiciona source ao .bashrc/.zshrc${NC}"
+    fi
+    
+    echo -e "\n   ${BOLD}4)${NC} ${GREEN}Voltar ao menu principal${NC}"
+    
+    show_separator
+    
+    read -p "$(echo -e "${BOLD}${WHITE}Escolha [1-4]: ${NC}")" opt_choice
+    
+    case $opt_choice in
+      1)
+        if [ "$ENABLE_SYSTEMD" = true ]; then
+          ENABLE_SYSTEMD=false
+          show_status "Systemd User Unit desativado"
+        else
+          ENABLE_SYSTEMD=true
+          show_status "Systemd User Unit ativado"
+        fi
+        sleep 1
+        ;;
+      2)
+        if [ "$ENABLE_HOOK" = true ]; then
+          ENABLE_HOOK=false
+          MODIFY_RC=false
+          show_status "Hook Shell desativado"
+        else
+          ENABLE_HOOK=true
+          show_status "Hook Shell ativado"
+        fi
+        sleep 1
+        ;;
+      3)
+        if [ "$ENABLE_HOOK" = true ]; then
+          if [ "$MODIFY_RC" = true ]; then
+            MODIFY_RC=false
+            show_status "Modificar RC files desativado"
+          else
+            MODIFY_RC=true
+            show_status "Modificar RC files ativado"
+          fi
+          sleep 1
+        else
+          echo -e "\n${ERROR} Ative o Hook Shell primeiro!${NC}"
+          sleep 1
+        fi
+        ;;
+      4)
+        return 0
+        ;;
+      *)
+        echo -e "\n${ERROR} Opção inválida!${NC}"
+        sleep 1
+        ;;
+    esac
+  done
+}
+
+# Mostrar informações
+show_information() {
+  show_banner
+  echo -e "\n${BOLD}${WHITE}Informações do Sistema:${NC}\n"
+  
+  echo -e "${DIM}Paths configurados:${NC}"
+  echo -e "  ${CYAN}Binário:${NC} $BASHBANNER_BIN"
+  echo -e "  ${CYAN}Configuração:${NC} $CONF_DIR"
+  echo -e "  ${CYAN}Backups:${NC} $BACKUP_DIR"
+  echo -e "  ${CYAN}Manifest:${NC} $MANIFEST"
+  
+  echo -e "\n${DIM}Status das opções:${NC}"
+  
+  if [ "$ENABLE_SYSTEMD" = true ]; then
+    echo -e "  ${CYAN}Systemd:${NC} ${GREEN}Ativado${NC}"
+  else
+    echo -e "  ${CYAN}Systemd:${NC} ${DIM}Desativado${NC}"
+  fi
+  
+  if [ "$ENABLE_HOOK" = true ]; then
+    echo -e "  ${CYAN}Hook:${NC} ${GREEN}Ativado${NC}"
+  else
+    echo -e "  ${CYAN}Hook:${NC} ${DIM}Desativado${NC}"
+  fi
+  
+  if [ "$MODIFY_RC" = true ]; then
+    echo -e "  ${CYAN}Modificar RC:${NC} ${GREEN}Ativado${NC}"
+  else
+    echo -e "  ${CYAN}Modificar RC:${NC} ${DIM}Desativado${NC}"
+  fi
+  
+  echo -e "\n${DIM}Estatísticas de banners:${NC}"
+  
+  local total_banners=0
+  for dir in "${BANNER_DIRS[@]}"; do
+    if [ -d "$CONF_DIR/$dir" ]; then
+      local count=$(find "$CONF_DIR/$dir" -name "*.txt" -type f 2>/dev/null | wc -l)
+      if [ "$count" -gt 0 ]; then
+        echo -e "  ${GREEN}✓ $dir:${NC} $count banner(s)"
+        total_banners=$((total_banners + count))
+      else
+        echo -e "  ${DIM}○ $dir:${NC} 0 banners"
+      fi
+    else
+      echo -e "  ${RED}✗ $dir:${NC} pasta não existe"
+    fi
+  done
+  
+  echo -e "\n  ${CYAN}Total:${NC} $total_banners banners"
+  
+  show_separator
+  echo -e "\n${DIM}Pressione Enter para voltar...${NC}"
+}
+
+# Executar instalação (usa as funções originais)
+execute_installation() {
+  echo -e "\n${BLUE}${BOLD}Iniciando instalação...${NC}"
+  
+  # Chama a função do instalador original
+  DO_INSTALL=true
+  do_install
+  
+  show_separator
+  echo -e "${GREEN}${BOLD}Instalação concluída com sucesso!${NC}"
+}
+
+# Executar desinstalação (usa as funções originais)
+execute_uninstallation() {
+  echo -e "\n${YELLOW}${BOLD}Iniciando desinstalação...${NC}"
+  
+  # Chama a função do desinstalador original
+  DO_UNINSTALL=true
+  do_uninstall
+  
+  show_separator
+  echo -e "${GREEN}${BOLD}Desinstalação concluída com sucesso!${NC}"
+}
+
+# ============================================================================
+# FUNÇÕES ORIGINAIS DO INSTALADOR (mantidas para compatibilidade)
+# ============================================================================
+
+show_help(){
+  cat <<EOF
+install_bashbanner.sh - reversible installer for BashBanner
+
+Usage:
+  $0 --install [--with-systemd] [--with-hook] [--no-rc]
+  $0 --uninstall
+  $0 --help
+
+Options:
+  --with-systemd    Enable a systemd --user unit that runs bashbanner --startup at login
+  --with-hook       Install the minimal hook script and add a single source line to shells' rc files
+  --no-rc           When used with --with-hook, do not modify ~/.bashrc or ~/.zshrc (manual activation)
+  --uninstall       Revert everything recorded in the manifest (safe, reversible)
+
+The installer creates backups and writes a manifest to: $MANIFEST
+EOF
+}
+
+manifest_add(){
+  mkdir -p "$(dirname "$MANIFEST")"
+  echo "$1" >> "$MANIFEST"
+}
+
+backup_file(){
+  local f="$1"
+  if [ -f "$f" ]; then
+    mkdir -p "$BACKUP_DIR"
+    local ts
+    ts=$(date +%s)
+    local b="$BACKUP_DIR/$(basename "$f").bak.$ts"
+    cp -- "$f" "$b"
+    manifest_add "BACKUP:$f:$b"
+    echo "Backup $f -> $b"
+  fi
+}
+
+write_file(){
+  local path="$1"; shift; local content="$*"
+  local tmp
+  tmp="$(mktemp)"
+  printf "%s" "$content" > "$tmp"
+  if [ -f "$path" ]; then
+    if cmp -s "$tmp" "$path"; then
+      rm -f "$tmp"
+      return 0
+    else
+      backup_file "$path"
+    fi
+  fi
+  mkdir -p "$(dirname "$path")"
+  mv "$tmp" "$path"
+  chmod 755 "$path" || true
+  manifest_add "CREATED:$path"
+  echo "Wrote $path"
+}
+
+remove_created(){
+  local path="$1"
+  if [ -e "$path" ]; then
+    rm -rf -- "$path"
+    echo "Removed $path"
+  fi
+}
+
+add_source_to_rc(){
+  local rc="$1"
+  local line='source "$HOME/.config/bashbanner/hook.sh"'
+  if [ ! -f "$rc" ]; then
+    touch "$rc"
+    manifest_add "CREATED:$rc"
+  else
+    backup_file "$rc"
+  fi
+  if ! grep -Fxq "source \"\$HOME/.config/bashbanner/hook.sh\"" "$rc"; then
+    printf "\n# bashbanner hook\nsource \"\$HOME/.config/bashbanner/hook.sh\"\n" >> "$rc"
+    manifest_add "APPENDED_RC:$rc"
+    echo "Appended source to $rc"
+  else
+    echo "RC $rc already contains hook source"
+  fi
+}
+
+remove_source_from_rc(){
+  local rc="$1"
+  if [ -f "$rc" ]; then
+    sed -i '/# bashbanner hook/d' "$rc" || true
+    sed -i '/source "$HOME\/\.config\/bashbanner\/hook.sh"/d' "$rc" || true
+    echo "Cleaned hook lines from $rc"
+  fi
+}
+
+bashbanner_content(){
+  cat <<'PY'
+#!/usr/bin/env python3
+"""
+bashbanner - pequeno utilitário para exibir banners.
+"""
+import argparse, random, os, sys, pathlib, subprocess
+
+HOME = pathlib.Path.home()
+CONF_DIR = HOME / ".config" / "bashbanner"
+BANNER_SUBS = {
+    "startup": "bannerstartup",
+    "downloads": "bannerdownloads",
+    "documents": "bannerdocuments",
+    "pictures": "bannerpictures",
+    "music": "bannermusic",
+    "videos": "bannervideos",
+    "public": "bannerpublico",
+    "desktop": "bannerdesktop",
+    "templates": "bannertemplates"
+}
+
+def find_random_banner(dirpath):
+    p = pathlib.Path(dirpath)
+    if not p.exists() or not p.is_dir():
+        return None
+    candidates = [f for f in p.iterdir() if f.is_file() and f.suffix == ".txt"]
+    if not candidates:
+        return None
+    return random.choice(candidates).read_text(errors="ignore")
+
+def who_ttys_for_user():
+    try:
+        out = subprocess.check_output(["who"]).decode(errors="ignore").splitlines()
+    except Exception:
+        return []
+    tt = []
+    user = os.getenv("USER") or os.getlogin()
+    for line in out:
+        parts = line.split()
+        if not parts: continue
+        u = parts[0]; tty = parts[1]
+        if u == user:
+            path = "/dev/" + tty
+            if os.path.exists(path):
+                tt.append(path)
+    return list(dict.fromkeys(tt))
+
+def write_to_ttys(text):
+    if not text:
+        return
+    ttys = who_ttys_for_user()
+    if not ttys:
+        sys.stdout.write(text)
+        return
+    for tty in ttys:
+        try:
+            with open(tty, "w") as f:
+                f.write(text + "\n")
+        except Exception:
+            pass
+
+def detect_banner_for_dir(dirpath):
+    b = os.path.basename(dirpath).lower()
+    for key, name in BANNER_SUBS.items():
+        if key in b:
+            path = CONF_DIR / name
+            return find_random_banner(path)
+    return find_random_banner(CONF_DIR / "bannerstartup")
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--startup", action="store_true")
+    ap.add_argument("--dir", metavar="DIR")
+    ap.add_argument("--list-dirs", action="store_true")
+    args = ap.parse_args()
+
+    if args.list_dirs:
+        print("Config dir:", CONF_DIR)
+        if CONF_DIR.exists():
+            for p in sorted([p.name for p in CONF_DIR.iterdir() if p.is_dir()]):
+                print("-", p)
+        return
+
+    if args.startup:
+        text = find_random_banner(CONF_DIR / "bannerstartup")
+        if text:
+            write_to_ttys(text)
+        else:
+            text = find_random_banner(CONF_DIR / "bannerdesktop")
+            write_to_ttys(text)
+        return
+
+    if args.dir:
+        text = detect_banner_for_dir(args.dir)
+        if text:
+            sys.stdout.write(text)
+        return
+
+if __name__ == "__main__":
+    main()
+PY
+}
+
+hook_content(){
+  cat <<'SH'
+# tiny bashbanner hook (idempotent)
+BASHBANNER_BIN="${BASHBANNER_BIN:-$HOME/.local/bin/bashbanner}"
+# only for interactive shells
+case "$-" in *i*) : ;; *) return ;; esac
+
+__bashbanner_hook() {
+  if [ -x "$BASHBANNER_BIN" ]; then
+    "$BASHBANNER_BIN" --dir "$PWD" >/dev/tty 2>/dev/null || true
+  fi
+}
+
+# bash: PROMPT_COMMAND (avoid duplicates)
+if [ -n "${BASH_VERSION:-}" ]; then
+  case ":${PROMPT_COMMAND:-}:" in
+    *":__bashbanner_hook:"*) : ;;
+    *) PROMPT_COMMAND="__bashbanner_hook;${PROMPT_COMMAND:-}" ;;
+  esac
 fi
 
-DESKTOP_DIR="${XDG_DESKTOP_DIR:-$HOME/Desktop}"
-DOCUMENTS_DIR="${XDG_DOCUMENTS_DIR:-$HOME/Documents}"
-DOWNLOADS_DIR="${XDG_DOWNLOAD_DIR:-$HOME/Downloads}"
-PICTURES_DIR="${XDG_PICTURES_DIR:-$HOME/Pictures}"
-MUSIC_DIR="${XDG_MUSIC_DIR:-$HOME/Music}"
-VIDEOS_DIR="${XDG_VIDEOS_DIR:-$HOME/Videos}"
-PUBLIC_DIR="${XDG_PUBLICSHARE_DIR:-$HOME/Public}"
-TEMPLATES_DIR="${XDG_TEMPLATES_DIR:-$HOME/Templates}"
-
-# Expand $HOME tokens if any
-for v in DESKTOP_DIR DOCUMENTS_DIR DOWNLOADS_DIR PICTURES_DIR MUSIC_DIR VIDEOS_DIR PUBLIC_DIR TEMPLATES_DIR; do
-  eval "$v=\"\${$v/\$HOME/\$HOME}\""
-done
-
-# pick a random .txt file from a directory robustly (works early, avoids fragile arrays)
-_display_random_banner() {
-  local dir="$1"
-  [ -d "$dir" ] || return 1
-
-  # Try find + shuf if available
-  local file
-  if command -v shuf >/dev/null 2>&1; then
-    file="$(find "$dir" -maxdepth 1 -type f -name '*.txt' -print 2>/dev/null | shuf -n1 2>/dev/null || true)"
-  else
-    # fallback: pick first .txt
-    file="$(find "$dir" -maxdepth 1 -type f -name '*.txt' -print 2>/dev/null | awk 'NR==1{print; exit}' || true)"
-  fi
-
-  [ -n "$file" ] || return 1
-  # Clear only if running in interactive terminal
-  if [ -t 1 ]; then clear; fi
-  cat "$file"
-  return 0
-}
-
-# --- STARTUP: exibe bannerstartup uma vez ao carregar o rc (apenas shells interativos) ---
-# Checa se shell é interativo: verifica se 'i' está presente em $-
-# Usa variável de controle DYNAMICB_STARTUP_SHOWN para exibir apenas uma vez por sessão
-case "$-" in
-  *i*)
-    if [ -z "${DYNAMICB_STARTUP_SHOWN:-}" ]; then
-      export DYNAMICB_STARTUP_SHOWN=1
-      # tenta exibir, mas não falha se não houver ficheiros/pasta
-      _display_random_banner "$SCRIPT_DIR/bannerstartup" || true
-    fi
-    ;;
-  *)
-    # não interativo: não faz nada
-    ;;
-esac
-# --- FIM STARTUP ---
-
-# Main checker executed on directory change
-_dynamicb_check_dir() {
-  local cwd="$PWD"
-
-  # 1) If we are inside user's real XDG dir, show the banner from INSTALL_DIR
-  case "$cwd" in
-    "$DOWNLOADS_DIR"*) _display_random_banner "$SCRIPT_DIR/bannerdownloads" && return ;;
-    "$DOCUMENTS_DIR"*) _display_random_banner "$SCRIPT_DIR/bannerdocuments" && return ;;
-    "$PICTURES_DIR"*)  _display_random_banner "$SCRIPT_DIR/bannerpictures" && return ;;
-    "$MUSIC_DIR"*)     _display_random_banner "$SCRIPT_DIR/bannermusic" && return ;;
-    "$VIDEOS_DIR"*)    _display_random_banner "$SCRIPT_DIR/bannervideos" && return ;;
-    "$PUBLIC_DIR"*)    _display_random_banner "$SCRIPT_DIR/bannerpublico" && return ;;
-    "$DESKTOP_DIR"*)   _display_random_banner "$SCRIPT_DIR/bannerdesktop" && return ;;
-    "$TEMPLATES_DIR"*) _display_random_banner "$SCRIPT_DIR/bannertemplates" && return ;;
-  esac
-
-  # 2) If user is inside the INSTALL_DIR banner subfolders (preview mode)
-  case "$cwd" in
-    "$SCRIPT_DIR"/bannerdownloads* ) _display_random_banner "$SCRIPT_DIR/bannerdownloads" && return ;;
-    "$SCRIPT_DIR"/bannerdocuments* ) _display_random_banner "$SCRIPT_DIR/bannerdocuments" && return ;;
-    "$SCRIPT_DIR"/bannerpictures* )  _display_random_banner "$SCRIPT_DIR/bannerpictures" && return ;;
-    "$SCRIPT_DIR"/bannertemplates* ) _display_random_banner "$SCRIPT_DIR/bannertemplates" && return ;;
-    "$SCRIPT_DIR"/bannermusic* )     _display_random_banner "$SCRIPT_DIR/bannermusic" && return ;;
-    "$SCRIPT_DIR"/bannervideos* )    _display_random_banner "$SCRIPT_DIR/bannervideos" && return ;;
-    "$SCRIPT_DIR"/bannerpublico* )   _display_random_banner "$SCRIPT_DIR/bannerpublico" && return ;;
-    "$SCRIPT_DIR"/bannerdesktop* )   _display_random_banner "$SCRIPT_DIR/bannerdesktop" && return ;;
-    "$SCRIPT_DIR"/bannerstartup* )   _display_random_banner "$SCRIPT_DIR/bannerstartup" && return ;;
-  esac
-
-  return 0
-}
-
-# Hook into zsh or bash
+# zsh: chpwd hook
 if [ -n "${ZSH_VERSION:-}" ]; then
   autoload -U add-zsh-hook 2>/dev/null || true
-  add-zsh-hook chpwd _dynamicb_check_dir 2>/dev/null || true
+  add-zsh-hook chpwd __bashbanner_hook 2>/dev/null || true
 fi
-if [ -n "${BASH_VERSION:-}" ]; then
-  # Avoid duplicating PROMPT_COMMAND entry
-  case ":${PROMPT_COMMAND:-}:" in
-    *":_dynamicb_check_dir:"*) : ;;
-    *) PROMPT_COMMAND="_dynamicb_check_dir;${PROMPT_COMMAND:-}" ;;
-  esac
-fi
-
-# END DynamicBanners
-EOF
+SH
 }
 
-##########################
-# Installer: append block safely
-##########################
-append_block_to_rc(){
-  local rc_file="$1"
-  ensure_state
+systemd_unit_content(){
+  cat <<'INI'
+[Unit]
+Description=BashBanner: show startup banner for user session
 
-  # create rc if missing
-  if [ ! -f "$rc_file" ]; then
-    touch "$rc_file"
-    manifest_add "CREATED_FILE $rc_file"
-    log "Criado $rc_file porque não existia."
-  fi
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/bashbanner --startup
 
-  # backup rc
-  local bkp="$BACKUP_DIR/$(basename "$rc_file").bak.$(date +%s)"
-  cp -- "$rc_file" "$bkp"
-  manifest_add "BACKUP_RC $rc_file $bkp"
-  log "Backup de $rc_file criado em $bkp"
-
-  # remove previous injected block (if any)
-  # sed range: from MARKER_BEGIN to MARKER_END inclusive
-  sed -i "/$MARKER_BEGIN/,/$MARKER_END/d" "$rc_file"
-
-  # prepare block with actual INSTALL_DIR substituted
-  local block
-  block="$(generate_injected_block)"
-  block="${block//__INSTALL_DIR__/$INSTALL_DIR}"
-
-  # append
-  printf "\n%s\n" "$block" >> "$rc_file"
-  manifest_add "APPENDED_RC $rc_file"
-  log "Bloco adicionado em $rc_file"
+[Install]
+WantedBy=default.target
+INI
 }
 
-##########################
-# Installer main
-##########################
-perform_install(){
-  ensure_state
-  log "Iniciando instalação em $INSTALL_DIR"
+do_install(){
+  echo "Starting install..."
+  mkdir -p "$BIN_DIR" "$CONF_DIR" "$BACKUP_DIR"
+  manifest_add "INSTALL_START:$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-  create_banner_dirs
+  write_file "$BASHBANNER_BIN" "$(bashbanner_content)"
 
-  # decide which rc(s) to modify
-  local default_shell rc_targets=()
-  default_shell="$(basename "${SHELL:-/bin/sh}")"
-  log "Shell detectado: $default_shell"
-
-  # interactive selection
-  echo "Escolha onde instalar:"
-  PS3="Opção: "
-  select opt in "Shell detectado ($default_shell)" "Ambos (bash + zsh)" "Escolher manualmente" "Cancelar"; do
-    case "$REPLY" in
-      1) rc_targets=("$default_shell"); break ;;
-      2) rc_targets=(bash zsh); break ;;
-      3) read -rp "Digite 'bash', 'zsh', ou ambos separados por espaço: " -a arr; rc_targets=("${arr[@]}"); break ;;
-      4) log "Instalação cancelada"; return ;;
-      *) echo "Opção inválida";;
-    esac
+  for sub in bannerstartup bannerdesktop bannerdownloads bannerdocuments bannerpictures bannermusic bannervideos bannerpublico bannertemplates; do
+    d="$CONF_DIR/$sub"
+    if [ ! -d "$d" ]; then
+      mkdir -p "$d"
+      manifest_add "CREATED:$d"
+      if [ -z "$(ls -A "$d" 2>/dev/null || true)" ]; then
+        printf "Example banner for %s\n" "$sub" > "$d/example.txt"
+        manifest_add "CREATED:$d/example.txt"
+      fi
+    fi
   done
 
-  for t in "${rc_targets[@]}"; do
-    case "$t" in
-      bash) append_block_to_rc "$BASHRC" ;;
-      zsh) append_block_to_rc "$ZSHRC" ;;
-      *)
-        log "Target desconhecido: $t"
-        ;;
-    esac
-  done
+  if [ "$ENABLE_HOOK" = true ]; then
+    write_file "$HOOK_SH" "$(hook_content)"
+    if [ "$MODIFY_RC" = true ]; then
+      add_source_to_rc "$HOME/.bashrc"
+      add_source_to_rc "$HOME/.zshrc"
+    else
+      echo "Hook installed at $HOOK_SH but not enabled in rc files (--no-rc). Activate manually by adding: source \"$HOOK_SH\""
+    fi
+  fi
 
-  log "Instalação concluída. Log: $LOG_FILE"
-  echo "Para aplicar agora: source ~/.bashrc (ou source ~/.zshrc)"
+  if [ "$ENABLE_SYSTEMD" = true ]; then
+    mkdir -p "$SYSTEMD_UNIT_DIR"
+    write_file "$SYSTEMD_UNIT" "$(systemd_unit_content)"
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl --user daemon-reload || true
+      systemctl --user enable --now bashbanner.service || true
+      manifest_add "ENABLED_SYSTEMD:bashbanner.service"
+      echo "Enabled systemd --user unit bashbanner.service"
+    else
+      echo "systemctl not found: cannot enable systemd unit" >&2
+    fi
+  fi
+
+  manifest_add "INSTALL_END:$(date -u +%Y-%m-dT%H:%M:%SZ)"
+  echo "Install complete. Manifest: $MANIFEST"
+  echo "To test: run '$BASHBANNER_BIN --list-dirs' and '$BASHBANNER_BIN --startup'"
 }
 
-##########################
-# Uninstall: revert changes per manifest/backups
-##########################
-perform_uninstall(){
-  ensure_state
-  if [ ! -s "$MANIFEST" ]; then
-    log "Manifest vazio — nada a desinstalar."
-    echo "Manifest vazio."
-    return
+do_uninstall(){
+  if [ ! -f "$MANIFEST" ]; then
+    echo "No manifest found at $MANIFEST. Nothing to uninstall."
+    exit 1
   fi
+  echo "Starting uninstall..."
 
-  echo "=== RESUMO DO QUE SERÁ REMOVIDO ==="
-  manifest_read | tee -a "$LOG_FILE"
-  echo "=================================="
-  read -rp "Confirma desinstalar e reverter tudo que aparece acima? (yes/no) " yn
-  if [ "$yn" != "yes" ]; then
-    log "Desinstalação abortada"
-    return
-  fi
-
-  # Restore RC backups if present, else remove markers
-  # We stored backup entries as BACKUP_RC <rc_file> <bkp_path>
-  # and APPENDED_RC <rc_file>
   tac "$MANIFEST" | while IFS= read -r line; do
-    set -- $line
-    cmd="$1"
-    case "$cmd" in
-      CREATED_DIR)
-        path="$2"
-        if is_within_install_dir "$path" && [ -d "$path" ]; then
-          rm -rf -- "$path"
-          log "Removido diretório: $path"
+    case "$line" in
+      BACKUP:*)
+        IFS=':' read -r _ orig backup <<< "$line"
+        if [ -f "$backup" ]; then
+          cp -- "$backup" "$orig"
+          echo "Restored $orig from $backup"
         fi
         ;;
-      CREATED_FILE)
-        path="$2"
-        if is_within_install_dir "$path" && [ -f "$path" ]; then
-          rm -f -- "$path"
-          log "Removido ficheiro: $path"
+      ENABLED_SYSTEMD:*)
+        if command -v systemctl >/dev/null 2>&1; then
+          systemctl --user disable --now bashbanner.service || true
+          systemctl --user daemon-reload || true
+          echo "Disabled systemd unit"
         fi
         ;;
-      BACKUP_RC)
-        # nothing to do here (handled by APPENDED_RC)
-        ;;
-      APPENDED_RC)
-        rc_file="$2"
-        # find latest backup for this rc
-        bkp="$(ls -1 "$BACKUP_DIR"/"$(basename "$rc_file")".bak.* 2>/dev/null | tail -n1 || true)"
-        if [ -n "$bkp" ] && [ -f "$bkp" ]; then
-          cp -- "$bkp" "$rc_file"
-          log "Restaurado $rc_file a partir do backup $bkp"
+      CREATED:*)
+        path="${line#CREATED:}"
+        if [[ "$path" == "$CONF_DIR"* ]] || [[ "$path" == "$BASHBANNER_BIN" ]] || [[ "$path" == "$SYSTEMD_UNIT" ]]; then
+          rm -rf -- "$path" || true
+          echo "Removed $path"
         else
-          # simply delete the block markers if no backup found
-          sed -i "/$MARKER_BEGIN/,/$MARKER_END/d" "$rc_file" || true
-          log "Removido bloco DynamicBanners de $rc_file (sem backup)"
+          echo "Skipping removal of $path (not managed)"
+        fi
+        ;;
+      APPENDED_RC:*)
+        rc="${line#APPENDED_RC:}"
+        bkp=$(ls -1 "$BACKUP_DIR"/"$(basename "$rc")".bak.* 2>/dev/null | tail -n1 || true)
+        if [ -n "$bkp" ] && [ -f "$bkp" ]; then
+          cp -- "$bkp" "$rc" && echo "Restored $rc from $bkp"
+        else
+          remove_source_from_rc "$rc"
         fi
         ;;
       *)
-        log "Linha de manifest não reconhecida: $line"
         ;;
     esac
   done
 
-  # remove backups and manifest
-  rm -rf -- "$BACKUP_DIR"
-  rm -f -- "$MANIFEST"
-  log "Removidos backups e manifest"
-
-  read -rp "Deseja apagar o log ($LOG_FILE)? (yes/no) " yn2
-  if [ "$yn2" = "yes" ]; then rm -f -- "$LOG_FILE"; log "Log apagado."; else log "Log mantido em $LOG_FILE"; fi
-
-  log "Desinstalação concluída"
+  rm -rf -- "$BACKUP_DIR" || true
+  rm -f -- "$MANIFEST" || true
+  echo "Uninstall complete. Backups and manifest removed."
 }
 
-##########################
-# Status & Log display
-##########################
-show_status(){
-  echo "Install dir: $INSTALL_DIR"
-  echo "Log file:    $LOG_FILE"
-  echo "Manifest:    $MANIFEST"
-  echo
-  echo "Conteúdo do manifest (se existente):"
-  if [ -s "$MANIFEST" ]; then manifest_read; else echo "(manifest vazio)"; fi
-}
+# ============================================================================
+# PONTO DE ENTRADA PRINCIPAL
+# ============================================================================
 
-show_log(){
-  if [ -f "$LOG_FILE" ]; then less "$LOG_FILE"; else echo "Nenhum log."; fi
-}
+# Verificar se há argumentos de linha de comando
+if [ "$#" -eq 0 ]; then
+  # Modo interativo
+  show_menu
+else
+  # Modo CLI original
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --install) DO_INSTALL=true; shift ;;
+      --uninstall) DO_UNINSTALL=true; shift ;;
+      --with-systemd) ENABLE_SYSTEMD=true; shift ;;
+      --with-hook) ENABLE_HOOK=true; shift ;;
+      --no-rc) MODIFY_RC=false; shift ;;
+      --help) show_help; exit 0 ;;
+      --menu) show_menu; exit 0 ;;
+      *) echo "Unknown argument: $1"; show_help; exit 1 ;;
+    esac
+  done
 
-##########################
-# CLI menu
-##########################
-while true; do
-  cat <<EOF
+  if [ "$DO_INSTALL" = true ] && [ "$DO_UNINSTALL" = true ]; then
+    echo "Can't --install and --uninstall at the same time"; exit 1
+  fi
 
-DynamicBanners Manager
-1) Instalar
-2) Desinstalar (reverte conforme manifest)
-3) Status
-4) Mostrar log
-5) Sair
-EOF
+  if [ "$DO_INSTALL" = true ]; then
+    do_install
+    exit 0
+  fi
 
-  read -rp "Escolha [1-5]: " opt
-  case "$opt" in
-    1) perform_install ;;
-    2) perform_uninstall ;;
-    3) show_status ;;
-    4) show_log ;;
-    5) log "Saindo."; exit 0 ;;
-    *) echo "Opção inválida." ;;
-  esac
-done
+  if [ "$DO_UNINSTALL" = true ]; then
+    do_uninstall
+    exit 0
+  fi
+
+  show_help
+fi
