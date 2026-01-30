@@ -59,6 +59,26 @@ declare -A BANNER_DESCRIPTIONS=(
     ["bannertemplates"]="Ao entrar na pasta Templates"
 )
 
+# Mapeamento de diretórios para pastas de banners
+declare -A DIR_BANNER_MAP=(
+    ["$HOME/Desktop"]="bannerdesktop"
+    ["$HOME/Desktop/"]="bannerdesktop"
+    ["$HOME/Downloads"]="bannerdownloads"
+    ["$HOME/Downloads/"]="bannerdownloads"
+    ["$HOME/Documents"]="bannerdocuments"
+    ["$HOME/Documents/"]="bannerdocuments"
+    ["$HOME/Pictures"]="bannerpictures"
+    ["$HOME/Pictures/"]="bannerpictures"
+    ["$HOME/Music"]="bannermusic"
+    ["$HOME/Music/"]="bannermusic"
+    ["$HOME/Videos"]="bannervideos"
+    ["$HOME/Videos/"]="bannervideos"
+    ["$HOME/Public"]="bannerpublico"
+    ["$HOME/Public/"]="bannerpublico"
+    ["$HOME/Templates"]="bannertemplates"
+    ["$HOME/Templates/"]="bannertemplates"
+)
+
 # Variáveis do menu
 ENABLE_SYSTEMD=false
 ENABLE_HOOK=false
@@ -831,26 +851,32 @@ remove_source_from_rc(){
   fi
 }
 
+# ATUALIZADO: Script Python corrigido
 bashbanner_content(){
   cat <<'PY'
 #!/usr/bin/env python3
 """
 bashbanner - pequeno utilitário para exibir banners.
 """
-import argparse, random, os, sys, pathlib, subprocess
+import argparse, random, os, sys, pathlib, subprocess, time
 
 HOME = pathlib.Path.home()
 CONF_DIR = HOME / ".config" / "bashbanner"
-BANNER_SUBS = {
-    "startup": "bannerstartup",
-    "downloads": "bannerdownloads",
-    "documents": "bannerdocuments",
-    "pictures": "bannerpictures",
-    "music": "bannermusic",
-    "videos": "bannervideos",
-    "public": "bannerpublico",
-    "desktop": "bannerdesktop",
-    "templates": "bannertemplates"
+
+# Cache para evitar exibição repetida na mesma sessão
+visited_dirs = set()
+startup_shown = False
+
+# Mapeamento de diretórios específicos para pastas de banners
+DIR_BANNER_MAP = {
+    str(HOME / "Desktop"): "bannerdesktop",
+    str(HOME / "Downloads"): "bannerdownloads",
+    str(HOME / "Documents"): "bannerdocuments",
+    str(HOME / "Pictures"): "bannerpictures",
+    str(HOME / "Music"): "bannermusic",
+    str(HOME / "Videos"): "bannervideos",
+    str(HOME / "Public"): "bannerpublico",
+    str(HOME / "Templates"): "bannertemplates",
 }
 
 def find_random_banner(dirpath):
@@ -894,38 +920,59 @@ def write_to_ttys(text):
             pass
 
 def detect_banner_for_dir(dirpath):
-    b = os.path.basename(dirpath).lower()
-    for key, name in BANNER_SUBS.items():
-        if key in b:
-            path = CONF_DIR / name
-            return find_random_banner(path)
-    return find_random_banner(CONF_DIR / "bannerstartup")
+    global visited_dirs
+    
+    # Evitar exibição repetida na mesma sessão
+    dir_str = str(dirpath)
+    if dir_str in visited_dirs:
+        return None
+    
+    # Verificar mapeamento direto
+    for mapped_dir, banner_folder in DIR_BANNER_MAP.items():
+        if dir_str == mapped_dir or dir_str.startswith(mapped_dir + "/"):
+            visited_dirs.add(dir_str)
+            return find_random_banner(CONF_DIR / banner_folder)
+    
+    return None
 
 def main():
+    global startup_shown
+    
     ap = argparse.ArgumentParser()
     ap.add_argument("--startup", action="store_true")
     ap.add_argument("--dir", metavar="DIR")
     ap.add_argument("--list-dirs", action="store_true")
+    ap.add_argument("--reset-cache", action="store_true", help="Resetar cache de diretórios visitados")
     args = ap.parse_args()
+
+    if args.reset_cache:
+        visited_dirs.clear()
+        startup_shown = False
+        return
 
     if args.list_dirs:
         print("Config dir:", CONF_DIR)
         if CONF_DIR.exists():
             for p in sorted([p.name for p in CONF_DIR.iterdir() if p.is_dir()]):
-                print("-", p)
+                banner_count = len(list((CONF_DIR / p).glob("*.txt")))
+                print(f"- {p}: {banner_count} banner(s)")
         return
 
     if args.startup:
-        text = find_random_banner(CONF_DIR / "bannerstartup")
-        if text:
-            write_to_ttys(text)
-        else:
-            text = find_random_banner(CONF_DIR / "bannerdesktop")
-            write_to_ttys(text)
+        if not startup_shown:
+            text = find_random_banner(CONF_DIR / "bannerstartup")
+            if text:
+                write_to_ttys(text)
+                startup_shown = True
+            else:
+                text = find_random_banner(CONF_DIR / "bannerdesktop")
+                write_to_ttys(text)
+                startup_shown = True
         return
 
     if args.dir:
-        text = detect_banner_for_dir(args.dir)
+        dirpath = pathlib.Path(args.dir).resolve()
+        text = detect_banner_for_dir(dirpath)
         if text:
             sys.stdout.write(text)
         return
@@ -935,32 +982,104 @@ if __name__ == "__main__":
 PY
 }
 
+# ATUALIZADO: Hook corrigido
 hook_content(){
   cat <<'SH'
-# tiny bashbanner hook (idempotent)
+# bashbanner hook (inteligente e não-repetitivo)
 BASHBANNER_BIN="${BASHBANNER_BIN:-$HOME/.local/bin/bashbanner}"
-# only for interactive shells
+CONF_DIR="$HOME/.config/bashbanner"
+
+# Apenas para shells interativos
 case "$-" in *i*) : ;; *) return ;; esac
 
-__bashbanner_hook() {
-  if [ -x "$BASHBANNER_BIN" ]; then
-    "$BASHBANNER_BIN" --dir "$PWD" >/dev/tty 2>/dev/null || true
-  fi
+# Variáveis de controle
+BASHBANNER_VISITED_DIRS=""
+BASHBANNER_STARTUP_SHOWN=0
+
+# Função para exibir banner de startup (apenas uma vez)
+__bashbanner_startup() {
+    if [ "$BASHBANNER_STARTUP_SHOWN" -eq 0 ] && [ -x "$BASHBANNER_BIN" ]; then
+        "$BASHBANNER_BIN" --startup 2>/dev/null && BASHBANNER_STARTUP_SHOWN=1
+    fi
 }
 
-# bash: PROMPT_COMMAND (avoid duplicates)
+# Função para verificar se diretório já foi visitado
+__bashbanner_is_visited() {
+    local dir="$1"
+    case ":${BASHBANNER_VISITED_DIRS}:" in
+        *":${dir}:"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Função para marcar diretório como visitado
+__bashbanner_mark_visited() {
+    local dir="$1"
+    if ! __bashbanner_is_visited "$dir"; then
+        BASHBANNER_VISITED_DIRS="${BASHBANNER_VISITED_DIRS}:${dir}"
+    fi
+}
+
+# Função principal do hook
+__bashbanner_hook() {
+    if [ -x "$BASHBANNER_BIN" ]; then
+        local current_dir="$PWD"
+        
+        # Lista de diretórios que devem exibir banners
+        local target_dirs="
+            $HOME/Desktop
+            $HOME/Downloads
+            $HOME/Documents
+            $HOME/Pictures
+            $HOME/Music
+            $HOME/Videos
+            $HOME/Public
+            $HOME/Templates
+        "
+        
+        # Verificar se o diretório atual é um dos alvos
+        for target_dir in $target_dirs; do
+            if [ -n "$target_dir" ] && [ "$current_dir" = "$target_dir" ]; then
+                if ! __bashbanner_is_visited "$current_dir"; then
+                    "$BASHBANNER_BIN" --dir "$current_dir" 2>/dev/null && __bashbanner_mark_visited "$current_dir"
+                fi
+                return
+            fi
+        done
+    fi
+}
+
+# Executar startup apenas uma vez quando o shell carregar
+__bashbanner_startup
+
+# Configurar hooks para shell
 if [ -n "${BASH_VERSION:-}" ]; then
-  case ":${PROMPT_COMMAND:-}:" in
-    *":__bashbanner_hook:"*) : ;;
-    *) PROMPT_COMMAND="__bashbanner_hook;${PROMPT_COMMAND:-}" ;;
-  esac
+    # Bash: usar PROMPT_COMMAND
+    case ":${PROMPT_COMMAND:-}:" in
+        *":__bashbanner_hook:"*) : ;;
+        *) 
+            if [ -z "$PROMPT_COMMAND" ]; then
+                PROMPT_COMMAND="__bashbanner_hook"
+            else
+                PROMPT_COMMAND="__bashbanner_hook;$PROMPT_COMMAND"
+            fi
+            ;;
+    esac
+elif [ -n "${ZSH_VERSION:-}" ]; then
+    # Zsh: usar chpwd hook
+    autoload -U add-zsh-hook 2>/dev/null || true
+    add-zsh-hook chpwd __bashbanner_hook 2>/dev/null || true
 fi
 
-# zsh: chpwd hook
-if [ -n "${ZSH_VERSION:-}" ]; then
-  autoload -U add-zsh-hook 2>/dev/null || true
-  add-zsh-hook chpwd __bashbanner_hook 2>/dev/null || true
-fi
+# Comando para resetar cache (útil para desenvolvimento)
+bashbanner-reset-cache() {
+    if [ -x "$BASHBANNER_BIN" ]; then
+        "$BASHBANNER_BIN" --reset-cache
+        BASHBANNER_VISITED_DIRS=""
+        BASHBANNER_STARTUP_SHOWN=0
+        echo "Cache do BashBanner resetado"
+    fi
+}
 SH
 }
 
@@ -972,6 +1091,7 @@ Description=BashBanner: show startup banner for user session
 [Service]
 Type=oneshot
 ExecStart=%h/.local/bin/bashbanner --startup
+Environment=DISPLAY=:0
 
 [Install]
 WantedBy=default.target
@@ -991,7 +1111,7 @@ do_install(){
       mkdir -p "$d"
       manifest_add "CREATED:$d"
       if [ -z "$(ls -A "$d" 2>/dev/null || true)" ]; then
-        printf "Example banner for %s\n" "$sub" > "$d/example.txt"
+        printf "=== %s ===\n\nEste é um banner de exemplo para %s.\nVocê pode editar ou substituir este arquivo.\n" "$sub" "$sub" > "$d/example.txt"
         manifest_add "CREATED:$d/example.txt"
       fi
     fi
@@ -1002,8 +1122,11 @@ do_install(){
     if [ "$MODIFY_RC" = true ]; then
       add_source_to_rc "$HOME/.bashrc"
       add_source_to_rc "$HOME/.zshrc"
+      echo "Hook instalado e ativado nos arquivos de configuração do shell."
+      echo "Recarregue o shell com 'source ~/.bashrc' ou abra um novo terminal."
     else
-      echo "Hook installed at $HOOK_SH but not enabled in rc files (--no-rc). Activate manually by adding: source \"$HOOK_SH\""
+      echo "Hook instalado em $HOOK_SH mas não ativado nos rc files (--no-rc)."
+      echo "Ative manualmente adicionando: source \"$HOOK_SH\" ao seu .bashrc/.zshrc"
     fi
   fi
 
@@ -1012,17 +1135,21 @@ do_install(){
     write_file "$SYSTEMD_UNIT" "$(systemd_unit_content)"
     if command -v systemctl >/dev/null 2>&1; then
       systemctl --user daemon-reload || true
-      systemctl --user enable --now bashbanner.service || true
+      systemctl --user enable --now bashbanner.service 2>/dev/null || true
       manifest_add "ENABLED_SYSTEMD:bashbanner.service"
-      echo "Enabled systemd --user unit bashbanner.service"
+      echo "Systemd user unit ativada. O banner de startup será exibido no login."
     else
-      echo "systemctl not found: cannot enable systemd unit" >&2
+      echo "systemctl não encontrado: não foi possível ativar a unit systemd" >&2
     fi
   fi
 
   manifest_add "INSTALL_END:$(date -u +%Y-%m-dT%H:%M:%SZ)"
   echo "Install complete. Manifest: $MANIFEST"
-  echo "To test: run '$BASHBANNER_BIN --list-dirs' and '$BASHBANNER_BIN --startup'"
+  echo "Para testar:"
+  echo "  - Banner de startup: $BASHBANNER_BIN --startup"
+  echo "  - Listar pastas: $BASHBANNER_BIN --list-dirs"
+  echo "  - Testar diretório: $BASHBANNER_BIN --dir ~/Downloads"
+  echo "  - Resetar cache: $BASHBANNER_BIN --reset-cache"
 }
 
 do_uninstall(){
@@ -1043,15 +1170,15 @@ do_uninstall(){
         ;;
       ENABLED_SYSTEMD:*)
         if command -v systemctl >/dev/null 2>&1; then
-          systemctl --user disable --now bashbanner.service || true
-          systemctl --user daemon-reload || true
+          systemctl --user disable --now bashbanner.service 2>/dev/null || true
+          systemctl --user daemon-reload 2>/dev/null || true
           echo "Disabled systemd unit"
         fi
         ;;
       CREATED:*)
         path="${line#CREATED:}"
         if [[ "$path" == "$CONF_DIR"* ]] || [[ "$path" == "$BASHBANNER_BIN" ]] || [[ "$path" == "$SYSTEMD_UNIT" ]]; then
-          rm -rf -- "$path" || true
+          rm -rf -- "$path" 2>/dev/null || true
           echo "Removed $path"
         else
           echo "Skipping removal of $path (not managed)"
@@ -1071,8 +1198,8 @@ do_uninstall(){
     esac
   done
 
-  rm -rf -- "$BACKUP_DIR" || true
-  rm -f -- "$MANIFEST" || true
+  rm -rf -- "$BACKUP_DIR" 2>/dev/null || true
+  rm -f -- "$MANIFEST" 2>/dev/null || true
   echo "Uninstall complete. Backups and manifest removed."
 }
 
